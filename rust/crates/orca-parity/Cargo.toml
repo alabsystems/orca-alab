@@ -1,0 +1,25 @@
+[package]
+name = "orca-parity"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Differential parity harness: runs the fresh Rust ports over a shared JSON vector corpus, self-checks against TS-derived golden values, and emits rust_outputs.json for cross-checking against the live TypeScript reference (see tools/parity)."
+
+[dependencies]
+serde_json = { version = "1", default-features = false, features = ["std", "preserve_order"] }
+# The shippable per-module dispatch registry this harness is the acceptance gate
+# for: parity re-exports it and layers only the two local parity-only oracles
+# (orchestration-store, nacl-box) on top. Every other domain crate reaches parity
+# transitively through orca-dispatch, so they are no longer direct deps here.
+orca-dispatch = { path = "../orca-dispatch" }
+# nacl-box oracle (kept local so the crypto stack stays out of the shipped wasm).
+orca-crypto = { path = "../orca-crypto" }
+orca-runtime = { path = "../orca-runtime" }
+# The orchestration-store module dumps raw table state for canonicalization;
+# version-matched with orca-store/orca-runtime so the bundled SQLite is shared.
+rusqlite = { version = "0.31", default-features = false, features = ["bundled"] }
+
+[lints.rust]
+unsafe_code = "forbid"

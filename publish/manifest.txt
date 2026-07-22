@@ -1,0 +1,7 @@
+README.md
+LICENSE
+NOTICE
+THIRD-PARTY-NOTICES.md
+.gitleaks.toml
+resources/build/icon.png
+resources/readme-hero.jpg

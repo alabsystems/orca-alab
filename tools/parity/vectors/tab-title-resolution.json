@@ -1,0 +1,223 @@
+{
+  "module": "tab-title-resolution",
+  "source": "src/shared/tab-title-resolution.ts",
+  "rustCrate": "orca-core::tab_title_resolution",
+  "cases": [
+    {
+      "function": "resolveTerminalTabTitle",
+      "note": "uses live terminal title when generated titles are disabled",
+      "input": {
+        "tab": { "customTitle": null, "generatedTitle": "Refactor auth", "title": "Claude working" },
+        "generatedTitlesEnabled": false,
+        "fallback": ""
+      },
+      "expected": "Claude working"
+    },
+    {
+      "function": "resolveTerminalTabTitle",
+      "note": "generated title sits between manual and live when enabled (no custom title)",
+      "input": {
+        "tab": { "customTitle": null, "generatedTitle": "Refactor auth", "title": "Claude working" },
+        "generatedTitlesEnabled": true,
+        "fallback": ""
+      },
+      "expected": "Refactor auth"
+    },
+    {
+      "function": "resolveTerminalTabTitle",
+      "note": "manual custom title wins over generated and live when enabled",
+      "input": {
+        "tab": { "customTitle": "Payments", "generatedTitle": "Refactor auth", "title": "Claude working" },
+        "generatedTitlesEnabled": true,
+        "fallback": ""
+      },
+      "expected": "Payments"
+    },
+    {
+      "function": "resolveTerminalTabTitle",
+      "note": "whitespace-only values are blank, generated wins and is trimmed",
+      "input": {
+        "tab": { "customTitle": "   ", "generatedTitle": "  Refactor  ", "title": "Claude" },
+        "generatedTitlesEnabled": true,
+        "fallback": ""
+      },
+      "expected": "Refactor"
+    },
+    {
+      "function": "resolveTerminalTabTitle",
+      "note": "all candidates blank falls back to the fallback string",
+      "input": {
+        "tab": { "customTitle": null, "generatedTitle": null, "title": "   " },
+        "generatedTitlesEnabled": true,
+        "fallback": "Untitled"
+      },
+      "expected": "Untitled"
+    },
+    {
+      "function": "resolveTerminalTabTitle",
+      "note": "quick command label sits between manual and generated titles (no custom title)",
+      "input": {
+        "tab": {
+          "customTitle": null,
+          "quickCommandLabel": "Run tests",
+          "generatedTitle": "Refactor auth",
+          "title": "pnpm test"
+        },
+        "generatedTitlesEnabled": true,
+        "fallback": ""
+      },
+      "expected": "Run tests"
+    },
+    {
+      "function": "resolveTerminalTabTitle",
+      "note": "manual custom title still wins over the quick command label",
+      "input": {
+        "tab": {
+          "customTitle": "Manual label",
+          "quickCommandLabel": "Run tests",
+          "generatedTitle": "Refactor auth",
+          "title": "pnpm test"
+        },
+        "generatedTitlesEnabled": true,
+        "fallback": ""
+      },
+      "expected": "Manual label"
+    },
+    {
+      "function": "resolveTerminalTabTitle",
+      "note": "whitespace-only quick command label is blank and falls through to the generated title",
+      "input": {
+        "tab": {
+          "customTitle": null,
+          "quickCommandLabel": "   ",
+          "generatedTitle": "Refactor auth",
+          "title": "pnpm test"
+        },
+        "generatedTitlesEnabled": true,
+        "fallback": ""
+      },
+      "expected": "Refactor auth"
+    },
+    {
+      "function": "resolveTerminalTabTitle",
+      "note": "empty quick command label falls through; generated disabled uses the live title",
+      "input": {
+        "tab": {
+          "customTitle": null,
+          "quickCommandLabel": "",
+          "generatedTitle": "Refactor auth",
+          "title": "pnpm test"
+        },
+        "generatedTitlesEnabled": false,
+        "fallback": ""
+      },
+      "expected": "pnpm test"
+    },
+    {
+      "function": "resolveUnifiedTabLabel",
+      "note": "unified labels use the same manual -> generated -> live priority when enabled",
+      "input": {
+        "tab": { "customLabel": null, "generatedLabel": "Fix flaky tests", "label": "Codex working" },
+        "generatedTitlesEnabled": true,
+        "fallback": ""
+      },
+      "expected": "Fix flaky tests"
+    },
+    {
+      "function": "resolveUnifiedTabLabel",
+      "note": "unified labels use the quick command label before the generated label",
+      "input": {
+        "tab": {
+          "customLabel": null,
+          "quickCommandLabel": "Run build",
+          "generatedLabel": "Fix flaky tests",
+          "label": "Codex working"
+        },
+        "generatedTitlesEnabled": true,
+        "fallback": ""
+      },
+      "expected": "Run build"
+    },
+    {
+      "function": "resolveUnifiedTabLabel",
+      "note": "whitespace-only unified quick command label falls through to the generated label",
+      "input": {
+        "tab": {
+          "customLabel": null,
+          "quickCommandLabel": "  ",
+          "generatedLabel": "Fix flaky tests",
+          "label": "Codex working"
+        },
+        "generatedTitlesEnabled": true,
+        "fallback": ""
+      },
+      "expected": "Fix flaky tests"
+    },
+    {
+      "function": "resolveUnifiedTabLabel",
+      "note": "undefined tab (persisted as null) resolves to the fallback",
+      "input": {
+        "tab": null,
+        "generatedTitlesEnabled": true,
+        "fallback": "New tab"
+      },
+      "expected": "New tab"
+    },
+    {
+      "function": "resolveTerminalTabTitle",
+      "note": "a bare-BOM customTitle is blank under JS trim, so it falls through to the generated title",
+      "input": {
+        "tab": {
+          "customTitle": "\uFEFF",
+          "generatedTitle": "Refactor",
+          "title": "Claude working"
+        },
+        "generatedTitlesEnabled": true,
+        "fallback": ""
+      },
+      "expected": "Refactor"
+    },
+    {
+      "function": "resolveTerminalTabTitle",
+      "note": "a BOM-prefixed customTitle is JS-trimmed to its content",
+      "input": {
+        "tab": {
+          "customTitle": "\uFEFFPayments",
+          "generatedTitle": "Refactor",
+          "title": "x"
+        },
+        "generatedTitlesEnabled": true,
+        "fallback": ""
+      },
+      "expected": "Payments"
+    },
+    {
+      "function": "resolveTerminalTabTitle",
+      "note": "a trailing U+0085 (NEL) is NOT JS-trimmed, so it stays in the title",
+      "input": {
+        "tab": {
+          "customTitle": "Payments\u0085",
+          "generatedTitle": "Refactor",
+          "title": "x"
+        },
+        "generatedTitlesEnabled": true,
+        "fallback": ""
+      },
+      "expected": "Payments\u0085"
+    },
+    {
+      "function": "resolveUnifiedTabLabel",
+      "note": "unified label: a bare-BOM customLabel falls through to the generated label",
+      "input": {
+        "tab": {
+          "customLabel": "\uFEFF",
+          "generatedLabel": "Fix tests",
+          "label": "Codex"
+        },
+        "generatedTitlesEnabled": true,
+        "fallback": ""
+      },
+      "expected": "Fix tests"
+    }
+  ]
+}

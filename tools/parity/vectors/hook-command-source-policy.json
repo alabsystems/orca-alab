@@ -1,0 +1,97 @@
+{
+  "module": "hook-command-source-policy",
+  "source": "src/shared/hook-command-source-policy.ts",
+  "rustCrate": "orca-core::hook_command_source_policy",
+  "cases": [
+    {
+      "function": "normalizeHookCommandSourcePolicy",
+      "note": "unknown/legacy persisted value (the removed shared-first mode) falls back to the committed shared-only policy",
+      "input": "shared-first",
+      "expected": "shared-only"
+    },
+    {
+      "function": "normalizeHookCommandSourcePolicy",
+      "note": "explicit local-only is preserved",
+      "input": "local-only",
+      "expected": "local-only"
+    },
+    {
+      "function": "normalizeHookCommandSourcePolicy",
+      "note": "explicit run-both is preserved",
+      "input": "run-both",
+      "expected": "run-both"
+    },
+    {
+      "function": "normalizeHookCommandSourcePolicy",
+      "note": "explicit shared-only is preserved",
+      "input": "shared-only",
+      "expected": "shared-only"
+    },
+    {
+      "function": "normalizeHookCommandSourcePolicy",
+      "note": "arbitrary unknown string falls back to shared-only",
+      "input": "totally-unknown",
+      "expected": "shared-only"
+    },
+    {
+      "function": "normalizeHookCommandSourcePolicy",
+      "note": "non-string input (number) falls back to shared-only",
+      "input": 42,
+      "expected": "shared-only"
+    },
+    {
+      "function": "normalizeHookCommandSourcePolicy",
+      "note": "null (the persisted JSON form of an absent/undefined value) falls back to shared-only",
+      "input": null,
+      "expected": "shared-only"
+    },
+    {
+      "function": "resolveHookCommandSourcePolicy",
+      "note": "absent policy (undefined) + a local script defaults to local-only [test-transcribed]",
+      "input": { "hasLocalScript": true },
+      "expected": "local-only"
+    },
+    {
+      "function": "resolveHookCommandSourcePolicy",
+      "note": "absent policy (undefined) + no local script defaults to shared-only [test-transcribed]",
+      "input": { "hasLocalScript": false },
+      "expected": "shared-only"
+    },
+    {
+      "function": "resolveHookCommandSourcePolicy",
+      "note": "explicit shared-only is preserved even with a local script [test-transcribed]",
+      "input": { "policy": "shared-only", "hasLocalScript": true },
+      "expected": "shared-only"
+    },
+    {
+      "function": "resolveHookCommandSourcePolicy",
+      "note": "explicit run-both is preserved [test-transcribed]",
+      "input": { "policy": "run-both", "hasLocalScript": true },
+      "expected": "run-both"
+    },
+    {
+      "function": "resolveHookCommandSourcePolicy",
+      "note": "explicit local-only is preserved [computed: valid value returned verbatim]",
+      "input": { "policy": "local-only", "hasLocalScript": false },
+      "expected": "local-only"
+    },
+    {
+      "function": "resolveHookCommandSourcePolicy",
+      "note": "present-but-invalid string never enables local-only even with a local script; only undefined does [computed: tri-state boundary]",
+      "input": { "policy": "shared-first", "hasLocalScript": true },
+      "expected": "shared-only"
+    },
+    {
+      "function": "resolveHookCommandSourcePolicy",
+      "note": "present null policy is NOT undefined, so even with a local script it resolves to shared-only (only an absent key enables local-only) [computed: tri-state present-null]",
+      "input": { "policy": null, "hasLocalScript": true },
+      "expected": "shared-only"
+    },
+    {
+      "function": "resolveHookCommandSourcePolicy",
+      "note": "present non-string policy (number) is not undefined, so a local script still yields shared-only [computed: tri-state present-non-string]",
+      "input": { "policy": 42, "hasLocalScript": true },
+      "expected": "shared-only"
+    }
+  ]
+}

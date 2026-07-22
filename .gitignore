@@ -1,0 +1,205 @@
+# Build artifacts
+tsconfig.*.tsbuildinfo
+
+# TypeScript emit artifacts next to sources (tsc produced these accidentally;
+# real source lives in .ts/.tsx). Hand-authored declaration files are
+# re-included below.
+src/**/*.js
+src/**/*.d.ts
+/electron.vite.config.js
+/electron.vite.config.d.ts
+!src/main/types/hosted-git-info.d.ts
+!src/preload/api-types.d.ts
+!src/preload/index.d.ts
+!src/renderer/src/env.d.ts
+!src/renderer/src/mermaid.d.ts
+!src/types/build-constants.d.ts
+
+# aterm wasm-bindgen glue: track the JS + .d.ts bindings WITH the committed _bg.wasm
+# binaries so a pull updates both ABI halves atomically (else a fresh clone is missing
+# the imports the renderer hard-imports, and a wasm bump can silently drift from glue).
+!src/renderer/src/lib/pane-manager/aterm/aterm_wasm.js
+!src/renderer/src/lib/pane-manager/aterm/aterm_wasm.d.ts
+!src/renderer/src/lib/pane-manager/aterm/aterm_wasm_bg.wasm.d.ts
+!src/renderer/src/lib/pane-manager/aterm/aterm_gpu_web.js
+!src/renderer/src/lib/pane-manager/aterm/aterm_gpu_web.d.ts
+!src/renderer/src/lib/pane-manager/aterm/aterm_gpu_web_bg.wasm.d.ts
+
+# orca-git wasm-bindgen glue for the addon-less SSH relay: commit the JS + .d.ts
+# bindings and the base64-embedded bytes (orca_git_wasm_bg.wasm.base64.ts, which
+# the relay imports) so a fresh clone builds without regenerating. The raw
+# _bg.wasm is redundant with the base64 module, so it is NOT committed.
+!src/relay/wasm/orca_git_wasm.js
+!src/relay/wasm/orca_git_wasm.d.ts
+!src/relay/wasm/orca_git_wasm_bg.wasm.d.ts
+src/relay/wasm/orca_git_wasm_bg.wasm
+
+# The RENDERER's copy of the same orca-git glue (loaded via vite `?url` + async
+# init, the aterm precedent). Here the raw _bg.wasm IS committed (tracked by
+# default — no unignore needed) so `?url` imports work from a fresh clone.
+!src/renderer/src/lib/git-wasm/orca_git_wasm.js
+!src/renderer/src/lib/git-wasm/orca_git_wasm.d.ts
+!src/renderer/src/lib/git-wasm/orca_git_wasm_bg.wasm.d.ts
+
+# orca-crypto wasm-bindgen glue for the app's E2EE. The Node main/CLI processes
+# import the base64-embedded bytes (orca_crypto_wasm_bg.wasm.base64.ts); the raw
+# _bg.wasm there is redundant with the base64 module, so NOT committed.
+!src/shared/crypto-wasm/orca_crypto_wasm.js
+!src/shared/crypto-wasm/orca_crypto_wasm.d.ts
+!src/shared/crypto-wasm/orca_crypto_wasm_bg.wasm.d.ts
+src/shared/crypto-wasm/orca_crypto_wasm_bg.wasm
+# The RENDERER's copy of the same crypto glue (loaded via vite `?url` + async
+# init). Here the raw _bg.wasm IS committed so `?url` imports work from a fresh
+# clone.
+!src/renderer/src/lib/crypto-wasm/orca_crypto_wasm.js
+!src/renderer/src/lib/crypto-wasm/orca_crypto_wasm.d.ts
+!src/renderer/src/lib/crypto-wasm/orca_crypto_wasm_bg.wasm.d.ts
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-electron/
+out/
+/build/
+release/
+native/**/.build/
+
+# pnpm
+.pnpm-store/
+package-lock.json
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+.serena/
+*.swp
+*.swo
+*~
+
+# OS
+*.stackdump
+.DS_Store
+Thumbs.db
+
+# Lint/cache
+.oxlintcache
+
+# Logs
+*.log
+*.log.*
+npm-debug.log*
+pnpm-debug.log*
+
+# Coverage
+coverage/
+
+# Benchmark run output
+/tools/benchmarks/results/*.json
+
+# Temp
+tmp/
+.tmp/
+# Empty err_* redirect files occasionally left behind by merge tooling.
+/err_*
+design-docs/
+.context/
+.atl/
+
+# Machine-local agent hook endpoint files may contain auth tokens.
+/agent-hooks/
+
+# Local-only design/planning docs (not checked in).
+# Durable docs must live in one of the allow-listed locations below.
+docs/**
+!docs/
+!docs/assets/
+!docs/assets/**
+!docs/readme/
+!docs/readme/**
+!docs/reference/
+!docs/reference/**
+# Keep generated React perf scan ledgers local; durable docs still use docs/reference.
+docs/reference/react-performance-audit.md
+!docs/STYLEGUIDE.md
+!docs/mobile-terminal-shortcut-bar.md
+# Native-Rust migration docs are durable reference material.
+!docs/rust-migration/
+!docs/rust-migration/**
+
+# Stably CLI (only docs/ are tracked)
+.stably/*
+!.stably/docs/
+.playwright-cli
+.validate-ui-screenshots/
+validation-screenshots/
+.stably-browser
+
+# Local scratch notes and PR evidence screenshots (not part of the product).
+/notes/
+/pr-evidence/
+
+# Regenerable upstream-triage API dumps (~7MB); the durable record lives in
+# docs/reference/upstream-triage/.
+/upstream-triage/
+
+# Playwright
+test-results/
+playwright-report/
+
+# Agent skill installations (machine-local, populated by agent tooling)
+/.claude/skills/
+/.agents/skills/
+/skills-lock.json
+
+# Agent hook runtime endpoints (machine-local secrets)
+/agent-hooks/
+
+# Rust native workspace build artifacts
+/rust/target/
+# rust/vendor is intentionally tracked: dependencies are vendored in-tree
+# (offline, reproducible, stripped builds) per the native-Rust migration goal.
+
+# trustc (Trust compiler) ICE crash dumps — build noise, never source
+rust/vendor/**/trustc-ice-*.txt
+
+validation-screenshots/
+
+# Localization bootstrap cache (regenerated by bootstrap:*-catalog)
+src/renderer/src/i18n/locales/.zh-catalog-cache.json
+src/renderer/src/i18n/locales/.ko-catalog-cache.json
+src/renderer/src/i18n/locales/.ja-catalog-cache.json
+src/renderer/src/i18n/locales/.es-catalog-cache.json
+
+# aterm vendored engine build artifacts
+rust/aterm/target/
+
+# orca-git-wasm build artifacts (its own workspace; the glue + base64 land in
+# src/relay/wasm, which is committed). Track its Cargo.lock for reproducible
+# wasm builds; ignore the target dir.
+rust/orca-git-wasm/target/
+rust/orca-crypto-wasm/target/
+# Offline-build scaffolding for the aterm sub-workspace (conformance snapshot tool):
+# regenerable `cargo vendor` output (~650MB) + its offline cargo config.
+rust/aterm/.aterm-vendor/
+rust/aterm/.cargo/
+
+# Cached pinned build tooling (wasm-bindgen-cli, etc.)
+config/.tooling/
+
+prod-release-scan-*.md
+/.bench-fixtures/
+
+# Bench result JSONs are working artifacts
+tools/benchmarks/results/terminal-pipeline-*.json
+tools/orc-electron/coi-killcheck/killcheck-result.json
+tools/autoformalize-candidates.json
+
+# Publication-engine stage artifacts (attestation, inventories)
+/publish/.out/

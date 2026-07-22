@@ -1,0 +1,54 @@
+# Its OWN workspace (like rust/aterm) so the wasm-bindgen web deps below never
+# enter the main rust/Cargo.lock — that workspace builds offline from rust/vendor
+# and has no wasm-bindgen vendored. Excluded from rust/Cargo.toml's workspace.
+# Built from the repo root (online) by config/scripts/build-orca-git-wasm.mjs.
+[workspace]
+
+[package]
+name = "orca-git-wasm"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+description = "wasm-bindgen binding for orca-git's pure git-output parsers + orca-text's error normaliser, so the addon-less SSH relay parses git in Rust (the same code the napi addon runs) instead of a hand-maintained TS reimplementation."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The SAME crates the napi addon drives — the wasm binding calls the identical
+# pure functions so relay output is byte-identical to the main process.
+orca-git = { path = "../crates/orca-git" }
+orca-core = { path = "../crates/orca-core" }
+orca-text = { path = "../crates/orca-text" }
+# orca-agents: the commit-message spawn planner the RENDERER diagnostic previews
+# (same code the main process runs via napi). The relay ships but never calls it,
+# same as the other renderer-only exports here.
+orca-agents = { path = "../crates/orca-agents" }
+# JSON marshalling for structured results (quick-open ranks etc.).
+serde_json = "1"
+# orca-dispatch: the aggregate per-module dispatch registry, exposed as the single
+# `orcaDispatch` op so any ported pure module ships to the relay/renderer via a TS
+# wrapper (no per-module wasm export). The identical registry the napi addon runs.
+orca-dispatch = { path = "../crates/orca-dispatch" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Pinned to the CLI version (config/.tooling/wasm-bindgen-0.2.108), matching aterm.
+wasm-bindgen = "=0.2.108"
+console_error_panic_hook = "0.1"
+# Some transitive dep may pull getrandom; on wasm32 it needs the JS backend.
+# Harmless if unused. Mirrors aterm-wasm.
+getrandom = { version = "0.2", features = ["js"] }
+# The async relay git-executor bridge: drive orca-git's multi-round ops through a
+# JS git executor by awaiting its Promise (wasm is single-threaded — it can't
+# block_on like the napi "A bridge"). Versions pinned to the set that pairs with
+# wasm-bindgen 0.2.108 (from aterm's lock).
+js-sys = "=0.3.85"
+wasm-bindgen-futures = "=0.4.58"
+
+# Own workspace root -> profiles live here. Ships in the relay bundle to remote
+# hosts, so optimise for size (the parsers are not on a throughput hot path).
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

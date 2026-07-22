@@ -1,0 +1,108 @@
+[
+  {
+    "name": "plain-text-wrap-col80",
+    "bytes_b64": "VGhlIHF1aWNrIGJyb3duIGZveCBqdW1wcyBvdmVyIHRoZSBsYXp5IGRvZy4gVGhlIHF1aWNrIGJyb3duIGZveCBqdW1wcyBvdmVyIHRoZSBsYXp5IGRvZy4gUGFjayBteSBib3ggd2l0aCBmaXZlIGRvemVuIGxpcXVvciBqdWdzLg=="
+  },
+  {
+    "name": "cr-lf-tab-handling",
+    "bytes_b64": "YWxwaGEJYmV0YQlnYW1tYQ0KZGVsdGEJZXBzaWxvbg0KemV0YQlvbmUJdHdvCXRocmVlCWZvdXIJZml2ZQ0Kb3ZlcndyaXRlLXRoaXMNTkVX"
+  },
+  {
+    "name": "cursor-cup-positioning",
+    "bytes_b64": "G1syShtbMTA7MjBIbWlkZGxlWBtbMTsxSHRvcC1sZWZ0G1syNDsxSGJvdHRvbS1sZWZ0G1s1OzQwSGNlbnRlcg=="
+  },
+  {
+    "name": "cursor-cuu-cud-cuf-cub",
+    "bytes_b64": "G1syShtbMTI7NDBIQ0VOVEVSG1szQVVQMxtbNUJET1dONRtbMTBDUklHSFQxMBtbMjBETEVGVDIw"
+  },
+  {
+    "name": "sgr-basic-16-colors",
+    "bytes_b64": "G1szMW1yZWQbWzMybWdyZWVuG1szM215ZWxsb3cbWzM0bWJsdWUbWzM1bW1hZ2VudGEbWzM2bWN5YW4bWzM3bXdoaXRlG1sxbWJvbGQbWzRtdW5kZXJsaW5lG1s3bXJldmVyc2UbWzBtcmVzZXQbWzkwbWJyaWdodC1ibGFjaxtbOTdtYnJpZ2h0LXdoaXRlG1swbQ=="
+  },
+  {
+    "name": "sgr-256-color",
+    "bytes_b64": "G1szODs1OzE5Nm1mZzE5NhtbNDg7NTsyMW1iZzIxG1szODs1OzIzMTs0ODs1OzE2bXdoaXRlLW9uLWJsYWNrG1swbRtbMzg7NTsyNDRtZ3JleRtbMG0="
+  },
+  {
+    "name": "sgr-rgb-truecolor",
+    "bytes_b64": "G1szODsyOzI1NTsxMjg7MG1vcmFuZ2UbWzQ4OzI7MDs2NDsxMjhtdGVhbC1iZxtbMG0bWzM4OzI7MTA7MjAwOzc1bWdyZWVuaXNoG1swbQ=="
+  },
+  {
+    "name": "el-erase-in-line-variants",
+    "bytes_b64": "G1syShtbMzsxSFhYWFhYWFhYWFhYWFhYWFhYWFhYG1szOzEwSBtbMEsbWzQ7MUhZWVlZWVlZWVlZWVlZWVlZWVlZWRtbNDsxMEgbWzFLG1s1OzFIWlpaWlpaWlpaWlpaWlpaWlpaWlobWzU7MTBIG1sySw=="
+  },
+  {
+    "name": "ed-erase-in-display-variants",
+    "bytes_b64": "G1syShtbMTsxSGZpbGwxG1syOzFIZmlsbDIbWzM7MUhmaWxsMxtbNDsxSGZpbGw0G1s1OzFIZmlsbDUbWzM7M0gbWzBKG1sxMDsxSGJlbG93G1s1OzFIG1sxSmFib3ZlLWNsZWFyZWQ="
+  },
+  {
+    "name": "ich-dch-insert-delete-chars",
+    "bytes_b64": "G1syShtbMTsxSEFCQ0RFRkdISUobWzE7NEgbWzNAG1syOzFIQUJDREVGR0hJShtbMjs0SBtbM1A="
+  },
+  {
+    "name": "il-dl-insert-delete-lines",
+    "bytes_b64": "G1syShtbMTsxSGxpbmUxG1syOzFIbGluZTIbWzM7MUhsaW5lMxtbNDsxSGxpbmU0G1syOzFIG1syTBtbNjsxSGxpbmU2G1s3OzFIbGluZTcbWzY7MUgbWzFN"
+  },
+  {
+    "name": "scroll-region-decstbm",
+    "bytes_b64": "G1syShtbNTsxNXIbWzU7MUh0b3BPZlJlZ2lvbhtbMTU7MUhsaW5lCmxpbmUKbGluZQpsaW5lCndyYXAtYXJvdW5kLXJlZ2lvbhtbcg=="
+  },
+  {
+    "name": "scroll-up-down-su-sd",
+    "bytes_b64": "G1syShtbMTsxSEEbWzI7MUhCG1szOzFIQxtbNDsxSEQbWzU7MUhFG1szUxtbMlQ="
+  },
+  {
+    "name": "save-restore-cursor-decsc-decrc",
+    "bytes_b64": "G1syShtbODs4SGhlcmU3GzcbWzIwOzQwSGVsc2V3aGVyZTgbOFJFU1RPUkVEG1tzG1syOzJIYWdhaW4bW3VCQUNL"
+  },
+  {
+    "name": "save-restore-cursor-with-sgr",
+    "bytes_b64": "G1syShtbMzFtGzcbWzBtG1s1OzVIcGxhaW4bOHN0aWxsLXJlZBtbMG0="
+  },
+  {
+    "name": "autowrap-decawm-off-on",
+    "bytes_b64": "G1syShtbPzdsG1sxOzc1SEFCQ0RFRkdISUpLTE1OT1Atbm93cmFwG1s/N2gbWzI7NzVIQUJDREVGR0hJSktMTU5PUC13cmFw"
+  },
+  {
+    "name": "tab-stops-hts-tbc",
+    "bytes_b64": "G1syShtbMTsxSBtbM2cbWzE7NUgbSBtbMTsyNUgbSBtbMTs1MEgbSBtbMjsxSAlBCUIJQxtbMzsxSBtbMTsxMEgbW2cbWzQ7MUgJYWZ0ZXItY2xlYXI="
+  },
+  {
+    "name": "origin-mode-decom",
+    "bytes_b64": "G1syShtbMTA7MjByG1s/NmgbWzE7MUhvcmlnaW4tcmVsYXRpdmUbWzU7M0h3aXRoaW4bWz82bBtbMTsxSGFic29sdXRlLXRvcA=="
+  },
+  {
+    "name": "overlong-params",
+    "bytes_b64": "G1syShtbOTk5OTk5OTk5Ozg4ODg4ODg4OEhjbGFtcGVkG1szODs1Ozk5OTk5OTk5bWNvbG9yG1swbRtbMTAwMDAwMEFkb25l"
+  },
+  {
+    "name": "csi-many-params",
+    "bytes_b64": "G1sxOzI7Mzs0OzU7Njs3Ozg7OTsxMDsxMTsxMjsxMzsxNDsxNTsxNjsxNzsxODsxOTsyMDsyMTsyMjsyMzsyNDsyNW1tYW55LXNnchtbMG0="
+  },
+  {
+    "name": "malformed-esc-no-final-byte",
+    "bytes_b64": "YmVmb3JlG2FmdGVyLWJhcmUtZXNjG1thZnRlci1jc2ktbm8tZmluYWw="
+  },
+  {
+    "name": "csi-huge-single-param",
+    "bytes_b64": "G1syShtbMTsxSBtbMjE0NzQ4MzY0OEJjbGFtcC1kb3duG1s5OTk5OTk5OTk5OTk5OTk5OTk5OUN0ZXh0"
+  },
+  {
+    "name": "partial-and-intermediate-sequences",
+    "bytes_b64": "G1s/MjVsG1s/MjVoY3Vyc29yLXRvZ2dsZRtbIHEbIzhERUMtYWxpZ24bJUd1dGY4GygwbHFreBsoQmJhY2stYXNjaWk="
+  },
+  {
+    "name": "mixed-utf8-multibyte-and-sgr",
+    "bytes_b64": "G1syShtbMTsxSBtbMzNtw6nDqMOqIOS9oOWlvSDCq3F1b3RlZMK7IOKAlGVt4oCUIMKxw5fDtyAbWzBtw4EtY29tYmluaW5n"
+  },
+  {
+    "name": "complex-fullscreen-altscreen",
+    "bytes_b64": "G1s/MTA0OWgbWzJKG1tIG1s0NDszN20bWzJLIFN0YXR1cyBCYXIgG1swbRtbMzsxSBtbMzJtPiBwcm9tcHQbWzBtG1s1OzEwSGl0ZW0gQRtbNjsxMEhpdGVtIEIbWzU7M0hpdGVtIEMbWz8xMDQ5bBtbMG1leGl0LWFsdHNjcmVlbg=="
+  },
+  {
+    "name": "invalid-utf8-raw-bytes",
+    "bytes_b64": "G1syShtbMTsxSGxhdGluMS1lLWFjdXRlOukgbG9uZS1jb250aW51YXRpb246gCB0cnVuY2F0ZWQtM2J5dGU65L0gb3Zlcmxvbmctc2xhc2g6wK8gZW5k",
+    "comment": "Deliberately invalid UTF-8 (raw 0xE9, lone continuation byte, truncated 3-byte seq, overlong encoding). Expected divergence: aterm emits U+FFFD per the Unicode substitution recommendation; xterm.js silently drops the bytes. aterm-more-correct — accepted divergence, see TRIAGE.md.",
+    "expected_divergence": true
+  }
+]

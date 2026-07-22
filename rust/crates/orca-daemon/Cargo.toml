@@ -1,0 +1,43 @@
+[package]
+name = "orca-daemon"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust terminal daemon for Orca (replaces the Node src/main/daemon): owns PTYs via orca-pty + a headless aterm engine per session (orca-terminal) and speaks the existing NDJSON socket protocol, so the napi PTY→engine hop disappears. Move 1 of the native migration."
+
+[[bin]]
+name = "orca-daemon"
+path = "src/main.rs"
+
+[dependencies]
+# The PTY + the wire framing already exist as crates; the daemon is their
+# composition over a Unix socket. serde_json (vendored) parses the requests as
+# Values (no derive), mirroring orca-relay's payload handling. orca-terminal is
+# the headless aterm engine the daemon feeds per session — getSnapshot/getCwd are
+# answered from it with NO napi hop (the whole point of Move 1).
+orca-pty = { path = "../orca-pty" }
+orca-net = { path = "../orca-net" }
+orca-terminal = { path = "../orca-terminal" }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+
+# Windows named-pipe transport: the unsafe winapi FFI is isolated here so this
+# crate keeps unsafe_code = "forbid". Empty (no-op) on non-Windows targets.
+[target.'cfg(windows)'.dependencies]
+orca-winpipe = { path = "../orca-winpipe" }
+
+# SIGTERM/SIGHUP teardown (termination_signals): SigSet::thread_block/wait are
+# safe wrappers, so the logout reaper needs no unsafe handler install (#7936).
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.25", default-features = false, features = ["signal"] }
+
+[dev-dependencies]
+# Integration tests are their own crate; they build request Values + parse responses.
+serde_json = { version = "1", default-features = false, features = ["std"] }
+# pump_bench example only: the inlined O_NONBLOCK gather it compares against the
+# blocking pump (fcntl/read/poll). See docs/rust-migration/daemon-pty-drain-investigation.md.
+nix = { version = "0.25", default-features = false, features = ["fs", "poll", "signal", "process"] }
+
+[lints.rust]
+unsafe_code = "forbid"

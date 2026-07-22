@@ -1,0 +1,248 @@
+// src/renderer/src/components/terminal-pane/keyboard-handlers.test.ts
+import { describe, it, expect, vi } from 'vitest'
+import { FIND_QUERY_MAX_BYTES } from '@/lib/find-query-bounds'
+
+// The copy-outcome seam toasts through sonner + deep-links through the store;
+// mock both so the copySelection test can observe the surfaced failure.
+const { toastErrorMock } = vi.hoisted(() => ({ toastErrorMock: vi.fn() }))
+vi.mock('sonner', () => ({
+  toast: { error: toastErrorMock, success: vi.fn() }
+}))
+
+import {
+  copyPaneSelectionViaShortcut,
+  matchFileSearchShortcut,
+  matchSearchNavigate,
+  resolveTerminalKeyboardShortcutAction,
+  runTerminalSearchNavigation
+} from './keyboard-handlers'
+
+function makeKeyEvent(
+  overrides: Partial<{
+    key: string
+    metaKey: boolean
+    ctrlKey: boolean
+    shiftKey: boolean
+    altKey: boolean
+    repeat: boolean
+  }>
+): Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'shiftKey' | 'altKey' | 'repeat'> {
+  return {
+    key: 'g',
+    metaKey: false,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    repeat: false,
+    ...overrides
+  }
+}
+
+describe('matchSearchNavigate', () => {
+  const isMac = true
+  const searchState = { query: 'hello', caseSensitive: false, regex: false }
+
+  it('returns "next" for Cmd+G on macOS', () => {
+    const e = makeKeyEvent({ metaKey: true })
+    expect(matchSearchNavigate(e, isMac, true, searchState)).toBe('next')
+  })
+
+  it('returns "previous" for Cmd+Shift+G on macOS', () => {
+    const e = makeKeyEvent({ metaKey: true, shiftKey: true })
+    expect(matchSearchNavigate(e, isMac, true, searchState)).toBe('previous')
+  })
+
+  it('returns null when search is closed', () => {
+    const e = makeKeyEvent({ metaKey: true })
+    expect(matchSearchNavigate(e, isMac, false, searchState)).toBeNull()
+  })
+
+  it('returns null when query is empty', () => {
+    const e = makeKeyEvent({ metaKey: true })
+    expect(
+      matchSearchNavigate(e, isMac, true, { query: '', caseSensitive: false, regex: false })
+    ).toBeNull()
+  })
+
+  it('returns null when query is too large for bounded terminal search', () => {
+    const e = makeKeyEvent({ metaKey: true })
+    expect(
+      matchSearchNavigate(e, isMac, true, {
+        query: 'x'.repeat(FIND_QUERY_MAX_BYTES + 1),
+        caseSensitive: false,
+        regex: false
+      })
+    ).toBeNull()
+  })
+
+  it('returns null for wrong key', () => {
+    const e = makeKeyEvent({ metaKey: true, key: 'f' })
+    expect(matchSearchNavigate(e, isMac, true, searchState)).toBeNull()
+  })
+
+  it('returns null when alt is pressed', () => {
+    const e = makeKeyEvent({ metaKey: true, altKey: true })
+    expect(matchSearchNavigate(e, isMac, true, searchState)).toBeNull()
+  })
+
+  it('returns "next" for Ctrl+G on Linux/Windows', () => {
+    const e = makeKeyEvent({ ctrlKey: true })
+    expect(matchSearchNavigate(e, false, true, searchState)).toBe('next')
+  })
+
+  it('returns "previous" for Ctrl+Shift+G on Linux/Windows', () => {
+    const e = makeKeyEvent({ ctrlKey: true, shiftKey: true })
+    expect(matchSearchNavigate(e, false, true, searchState)).toBe('previous')
+  })
+
+  it('returns null for Ctrl+G on macOS (wrong modifier)', () => {
+    const e = makeKeyEvent({ ctrlKey: true })
+    expect(matchSearchNavigate(e, true, true, searchState)).toBeNull()
+  })
+})
+
+describe('resolveTerminalKeyboardShortcutAction', () => {
+  it('routes macOS Shift+Enter with the active Windows PTY host bytes', () => {
+    expect(
+      resolveTerminalKeyboardShortcutAction(
+        makeKeyEvent({ key: 'Enter', shiftKey: true }),
+        true,
+        'false',
+        0,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        () => 'alt-enter',
+        () => true
+      )
+    ).toEqual({ type: 'sendInput', data: '\x1b\r' })
+  })
+})
+
+describe('runTerminalSearchNavigation', () => {
+  const searchState = { query: 'hello', caseSensitive: true, regex: false }
+
+  it('runs the next search through the aterm search facade', () => {
+    const findNext = vi.fn(() => true)
+    const findPrevious = vi.fn(() => false)
+    const pane = { searchAddon: { findNext, findPrevious } } as unknown as Parameters<
+      typeof runTerminalSearchNavigation
+    >[0]
+
+    expect(runTerminalSearchNavigation(pane, 'next', searchState)).toBe(true)
+    expect(findNext).toHaveBeenCalledWith('hello', { caseSensitive: true, regex: false })
+    expect(findPrevious).not.toHaveBeenCalled()
+  })
+
+  it('runs the previous search through the aterm search facade', () => {
+    const findNext = vi.fn(() => false)
+    const findPrevious = vi.fn(() => true)
+    const pane = { searchAddon: { findNext, findPrevious } } as unknown as Parameters<
+      typeof runTerminalSearchNavigation
+    >[0]
+
+    expect(runTerminalSearchNavigation(pane, 'previous', searchState)).toBe(true)
+    expect(findPrevious).toHaveBeenCalledWith('hello', { caseSensitive: true, regex: false })
+    expect(findNext).not.toHaveBeenCalled()
+  })
+})
+
+describe('matchFileSearchShortcut', () => {
+  it('matches Cmd+Shift+F on macOS', () => {
+    expect(
+      matchFileSearchShortcut(makeKeyEvent({ key: 'F', metaKey: true, shiftKey: true }), 'darwin')
+    ).toBe(true)
+  })
+
+  it('matches Ctrl+Shift+F on Linux/Windows', () => {
+    expect(
+      matchFileSearchShortcut(makeKeyEvent({ key: 'F', ctrlKey: true, shiftKey: true }), 'linux')
+    ).toBe(true)
+  })
+
+  it('rejects repeats, alt, and the wrong platform modifier', () => {
+    expect(
+      matchFileSearchShortcut(
+        makeKeyEvent({ key: 'F', metaKey: true, shiftKey: true, repeat: true }),
+        'darwin'
+      )
+    ).toBe(false)
+    expect(
+      matchFileSearchShortcut(
+        makeKeyEvent({ key: 'F', metaKey: true, shiftKey: true, altKey: true }),
+        'darwin'
+      )
+    ).toBe(false)
+    expect(
+      matchFileSearchShortcut(makeKeyEvent({ key: 'F', ctrlKey: true, shiftKey: true }), 'darwin')
+    ).toBe(false)
+  })
+
+  it('follows customized file-search bindings', () => {
+    const overrides = { 'sidebar.search.toggle': ['Ctrl+Alt+S'] }
+
+    expect(
+      matchFileSearchShortcut(
+        makeKeyEvent({ key: 's', ctrlKey: true, altKey: true }),
+        'linux',
+        overrides
+      )
+    ).toBe(true)
+    expect(
+      matchFileSearchShortcut(
+        makeKeyEvent({ key: 'F', ctrlKey: true, shiftKey: true }),
+        'linux',
+        overrides
+      )
+    ).toBe(false)
+  })
+
+  it('lets terminal-first pass the file-search shortcut through to the terminal', () => {
+    expect(
+      matchFileSearchShortcut(
+        makeKeyEvent({ key: 'F', metaKey: true, shiftKey: true }),
+        'darwin',
+        undefined,
+        'terminal-first'
+      )
+    ).toBe(false)
+  })
+
+  it('does not match when file search is disabled', () => {
+    expect(
+      matchFileSearchShortcut(makeKeyEvent({ key: 'F', metaKey: true, shiftKey: true }), 'darwin', {
+        'sidebar.search.toggle': []
+      })
+    ).toBe(false)
+  })
+})
+
+describe('copyPaneSelectionViaShortcut (Cmd/Ctrl+Shift+C)', () => {
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
+  function makePane(selection: string): Parameters<typeof copyPaneSelectionViaShortcut>[0] {
+    return { terminal: { getSelection: () => selection } } as unknown as Parameters<
+      typeof copyPaneSelectionViaShortcut
+    >[0]
+  }
+
+  it('surfaces a failed clipboard write instead of swallowing it', async () => {
+    const write = vi.fn().mockResolvedValue(false)
+    vi.stubGlobal('window', { api: { ui: { writeClipboardText: write } } })
+    try {
+      expect(copyPaneSelectionViaShortcut(makePane('copied text'))).toBe(true)
+      await settle()
+      expect(write).toHaveBeenCalledWith('copied text')
+      expect(toastErrorMock).toHaveBeenCalledTimes(1)
+      expect(String(toastErrorMock.mock.calls[0]?.[0])).toContain('Copy failed')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('reports no shortcut consumption without a selection', () => {
+    expect(copyPaneSelectionViaShortcut(makePane(''))).toBe(false)
+  })
+})

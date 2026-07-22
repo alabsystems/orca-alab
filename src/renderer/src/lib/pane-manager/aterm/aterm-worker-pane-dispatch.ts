@@ -1,0 +1,347 @@
+// Per-pane state + command dispatch for the SHARED render worker: the worker entry
+// (aterm-render-worker) owns the paneId→PaneRuntime registry and the lifecycle
+// messages (init / fallback / dispose); every other pane-scoped command lands here.
+// Split from the entry to keep both files under the line budget.
+
+import type { StoredInit, WorkerEngine } from './aterm-worker-engine-build'
+import type { WorkerTerminal } from './aterm-worker-terminal'
+import type { WorkerFrameScheduler } from './aterm-worker-frame-scheduler'
+import {
+  dispatchAtermWorkerRainCommand,
+  type AtermWorkerRainTarget
+} from './aterm-worker-rain-dispatch'
+import { dispatchAtermWorkerPredictCommand } from './aterm-worker-predictor'
+import { answerPaneQuery } from './aterm-worker-pane-query'
+import { dispatchAtermWorkerScrollCommand } from './aterm-worker-scroll-dispatch'
+import type {
+  AtermWorkerPaneEvent,
+  AtermWorkerPaneRuntimeCommand
+} from './aterm-render-worker-protocol'
+
+// Both engine bindings ship these (aterm_wasm/aterm_gpu_web), but the WorkerEngine
+// Pick + worker terminal predate them — cast here, surgically, until the planned
+// worker refactor folds them into aterm-worker-terminal.
+export type EngineSettingSetters = AtermWorkerRainTarget & {
+  set_minimum_contrast: (ratio: number) => void
+  set_word_separators: (separators?: string | null) => void
+  set_background_opacity: (opacity: number) => void
+  set_cursor_opacity: (opacity: number) => void
+  set_kitty_keyboard_enabled: (enabled: boolean) => void
+  set_sparkle_words_enabled: (on: boolean) => void
+  set_sparkle_classes: (
+    profanity: boolean,
+    feline: boolean,
+    orca: boolean,
+    emphasis: boolean
+  ) => void
+  set_sparkle_reduced_motion: (on: boolean) => void
+  set_cursor_glow: (
+    enabled: boolean,
+    style: string,
+    color: number | null | undefined,
+    accent: number | null | undefined,
+    durationMs: number,
+    length: number,
+    intensity: number,
+    radius: number,
+    ring: boolean
+  ) => void
+  set_effects_focused: (focused: boolean) => void
+  set_chrome: (pad: number, head: number) => void
+}
+
+/** Everything the worker keeps for ONE pane. Deliberately per-pane: the serialize
+ *  cache, frame scheduler (dirty flag + suspend state) and stored init must never be
+ *  shared, so one pane's dispose/crash-seed/suspend can't touch another's. */
+export type PaneRuntime = {
+  paneId: number
+  term: WorkerTerminal | null
+  engineSetters: EngineSettingSetters | null
+  /** The raw engine + its module kind, for worker-level font work: the per-frame
+   *  missing-font-class drain and late 'fontClass' application (E1 lazy fonts). */
+  engine: WorkerEngine | null
+  engineKind: 'cpu' | 'gpu' | null
+  /** The engine module's linear memory (the spill compositor's byte source). */
+  engineMemory: WebAssembly.Memory | null
+  storedInit: StoredInit | null
+  canvas: OffscreenCanvas | null
+  /** Don't fall back twice if more than one init error is posted for this pane. */
+  fellBackToCpu: boolean
+  /** Set by 'dispose' — an engine still building when it flips is freed on arrival. */
+  disposed: boolean
+  /** Newest searchFind query id seen at message ARRIVAL (the entry records it before
+   *  the QoS scheduler may defer execution behind a flood backlog), so a queued find
+   *  that was superseded is answered null without paying the engine search. */
+  latestSearchFindQueryId: number
+  /** Window-space effects chrome (device px; 0/0 = none). Stored on the pane so a
+   *  GPU→CPU rebuild re-applies it and every STATE snapshot echoes it. */
+  chrome: { pad: number; head: number }
+  frameScheduler: WorkerFrameScheduler
+  serializeCache: { schedule: () => void; dispose: () => void }
+  /** Post a pane event to main; the entry stamps this pane's paneId on it. */
+  post: (event: AtermWorkerPaneEvent) => void
+}
+
+/** Handle one non-lifecycle command for `pane`. Commands for a pane whose engine is
+ *  still building (or died) no-op safely, same as the single-engine worker did. */
+export function dispatchPaneCommand(pane: PaneRuntime, msg: AtermWorkerPaneRuntimeCommand): void {
+  const term = pane.term
+  const scheduleDraw = pane.frameScheduler.schedule
+  switch (msg.type) {
+    case 'setMatrixRain':
+    case 'setEffectsVisibility':
+    case 'effectActivity':
+    case 'matrixRainPulse':
+      dispatchAtermWorkerRainCommand(pane.engineSetters, scheduleDraw, msg)
+      return
+    case 'process': {
+      if (!term) {
+        return
+      }
+      const side = term.processBytes(msg.data)
+      // Post the edge-triggered side channels immediately (NOT coalesced) so none are
+      // dropped: replies → PTY, OSC app-events → dispatch, notifications → OS
+      // dispatch, bell → re-emit.
+      if (side.reply) {
+        pane.post({ type: 'reply', data: side.reply })
+      }
+      if (side.osc) {
+        pane.post({ type: 'osc', events: side.osc })
+      }
+      if (side.notifications) {
+        pane.post({ type: 'notifications', events: side.notifications })
+      }
+      if (side.bell) {
+        pane.post({ type: 'bell' })
+      }
+      // KeyboardMode flips post immediately too: the main thread's synchronous
+      // key encoding reads its snapshot mirror, and waiting for the next
+      // coalesced frame STATE leaves an idle (no-output) kitty app encoding
+      // under the OLD mode for an unbounded window.
+      if (side.keyboardModeBits !== undefined) {
+        pane.post({ type: 'keyboardModeBits', bits: side.keyboardModeBits })
+      }
+      // Reconcile speculative guesses against the grid THIS chunk just produced —
+      // confirmed ghosts retire, divergence/no-echo flushes. Must run here (not on a
+      // separate posted command) so it sees the freshly-applied grid; scheduleDraw then
+      // repaints (buildState reflects the retired ghosts). No-op while prediction is off.
+      term.predict.reconcile()
+      scheduleDraw()
+      pane.serializeCache.schedule()
+      return
+    }
+    case 'draw':
+      // Interactive echo nudge (main-thread presentNow): paint SYNCHRONOUSLY so the
+      // glyph catches the current compositor frame instead of waiting a full worker
+      // rAF behind the sibling 'process' schedule. Bulk output still coalesces via
+      // scheduleDraw() on 'process'.
+      pane.frameScheduler.presentNow()
+      return
+    case 'resize':
+      term?.resize(msg.rows, msg.cols)
+      scheduleDraw()
+      return
+    case 'setPx':
+      term?.setPx(msg.px)
+      scheduleDraw()
+      return
+    case 'setLineHeight':
+      term?.setLineHeight(msg.lineHeight)
+      scheduleDraw()
+      return
+    case 'setLigatures':
+      term?.setLigatures(msg.on)
+      scheduleDraw()
+      return
+    case 'setScrollbackLimit':
+      term?.setScrollbackLimit(msg.lines)
+      return
+    case 'setMinimumContrast':
+      // Appearance-only: repaint so the floored fg shows without waiting for output.
+      pane.engineSetters?.set_minimum_contrast(msg.ratio)
+      scheduleDraw()
+      return
+    case 'setWordSeparators':
+      // Selection-behavior only (next double-click) — no repaint needed.
+      pane.engineSetters?.set_word_separators(msg.separators ?? undefined)
+      return
+    case 'setBackgroundOpacity':
+      // Appearance-only: repaint so the translucent default bg shows immediately.
+      pane.engineSetters?.set_background_opacity(msg.opacity)
+      scheduleDraw()
+      return
+    case 'setCursorOpacity':
+      pane.engineSetters?.set_cursor_opacity(msg.opacity)
+      scheduleDraw()
+      return
+    case 'setKittyKeyboardEnabled':
+      // Protocol capability only (affects future CSI ? u replies) — no repaint.
+      pane.engineSetters?.set_kitty_keyboard_enabled(msg.enabled)
+      return
+    // Effects setters repaint render-only (no snapshot field changes); the frame
+    // scheduler's tickEffects then keeps rAF cadence while the engine animates.
+    case 'setSparkleWordsEnabled':
+      pane.engineSetters?.set_sparkle_words_enabled(msg.on)
+      scheduleDraw(false)
+      return
+    case 'setSparkleClasses':
+      pane.engineSetters?.set_sparkle_classes(msg.profanity, msg.feline, msg.orca, msg.emphasis)
+      scheduleDraw(false)
+      return
+    case 'setSparkleReducedMotion':
+      pane.engineSetters?.set_sparkle_reduced_motion(msg.on)
+      scheduleDraw(false)
+      return
+    case 'setCursorGlow':
+      pane.engineSetters?.set_cursor_glow(
+        msg.enabled,
+        msg.style,
+        msg.color ?? undefined,
+        msg.accent ?? undefined,
+        msg.durationMs,
+        msg.length,
+        msg.intensity,
+        msg.radius,
+        msg.ring
+      )
+      scheduleDraw(false)
+      return
+    case 'setEffectsFocused':
+      pane.engineSetters?.set_effects_focused(msg.focused)
+      scheduleDraw(false)
+      return
+    case 'setChrome':
+      // Chrome resizes the framebuffer, so post a STATE (not render-only): the
+      // loader must re-pin the canvas CSS box + margins from the new dims.
+      pane.chrome = { pad: msg.pad, head: msg.head }
+      pane.engineSetters?.set_chrome(msg.pad, msg.head)
+      scheduleDraw()
+      return
+    case 'setDefaultCursorStyle':
+      term?.setDefaultCursorStyle(msg.param)
+      scheduleDraw()
+      return
+    // Predictive echo: route each keystroke seam to the pane's predictor (+ a repaint).
+    case 'predictSetMode':
+    case 'predictChar':
+    case 'predictBackspace':
+    case 'predictSubmit':
+    case 'predictReset':
+      dispatchAtermWorkerPredictCommand(term?.predict, scheduleDraw, msg)
+      return
+    case 'setColorScheme': {
+      // set_color_scheme may queue a CSI ?997 push (when the scheme changed AND the app
+      // enabled DEC 2031); forward it through the reply channel → main → PTY.
+      const reply = term ? term.setColorScheme(msg.dark) : ''
+      if (reply) {
+        pane.post({ type: 'reply', data: reply })
+      }
+      return
+    }
+    case 'scrollLines':
+    case 'scrollPx':
+    case 'scrollToBottom':
+    case 'scrollToTop':
+    case 'scrollToLine':
+      dispatchAtermWorkerScrollCommand(term, scheduleDraw, msg)
+      return
+    case 'selectionStart':
+      term?.selectionStart(msg.row, msg.col)
+      scheduleDraw()
+      return
+    case 'selectionExtend':
+      term?.selectionExtend(msg.row, msg.col)
+      scheduleDraw()
+      return
+    case 'selectionFinish':
+      term?.selectionFinish()
+      scheduleDraw()
+      return
+    case 'selectionWord':
+      term?.selectionWord(msg.row, msg.col)
+      scheduleDraw()
+      return
+    case 'selectionLine':
+      term?.selectionLine(msg.row, msg.col)
+      scheduleDraw()
+      return
+    case 'selectionClear':
+      term?.selectionClear()
+      scheduleDraw()
+      return
+    case 'themeSet':
+      term?.themeSet(msg)
+      scheduleDraw()
+      return
+    case 'setSelectionInactive':
+      term?.setSelectionInactive(msg.inactive)
+      scheduleDraw()
+      return
+    case 'setSelectionInactiveBg':
+      term?.setSelectionInactiveBg(msg.bg)
+      scheduleDraw()
+      return
+    case 'setClipboardWriteAuthorized':
+      term?.setClipboardWriteAuthorized(msg.allowed)
+      return
+    case 'setNotificationsAuthorized':
+      term?.setNotificationsAuthorized(msg.allowed)
+      return
+    case 'setDrawSuspended':
+      pane.frameScheduler.setSuspended(msg.suspended)
+      return
+    case 'setCursorBlinkPhase':
+      // Render-only: repaint the cursor cell, but post NO state (no snapshot field tracks
+      // blink phase, so the STATE would be byte-identical).
+      term?.setCursorBlinkPhase(msg.on)
+      scheduleDraw(false)
+      return
+    case 'setCursorHollow':
+      term?.setCursorHollow(msg.hollow)
+      scheduleDraw(false)
+      return
+    case 'setHover': {
+      // Hover only drives the main-thread underline overlay + cursor (STATE fields), not the
+      // engine framebuffer — so post a render-free STATE, and only when the OUTCOME changed,
+      // so sweeping the mouse across cells does no render() and often no post at all.
+      const hoverChanged = term?.setHover('clear' in msg ? null : { row: msg.row, col: msg.col })
+      if (hoverChanged) {
+        pane.frameScheduler.scheduleStatePost()
+      }
+      return
+    }
+    case 'searchNext':
+      term?.searchNext()
+      scheduleDraw()
+      return
+    case 'searchPrev':
+      term?.searchPrev()
+      scheduleDraw()
+      return
+    case 'searchClear':
+      term?.searchClear()
+      scheduleDraw()
+      return
+    case 'setPrimaryFont':
+      term?.setPrimaryFont(msg.bytes)
+      scheduleDraw()
+      return
+    case 'setBoldFont':
+      term?.setBoldFont(msg.bytes)
+      scheduleDraw()
+      return
+    case 'mouseEncode': {
+      // The encoded mouse report is PTY input — forward it through the reply channel
+      // (→ main onReply → inputSink), same as engine query replies.
+      const data = term
+        ? term.mouseEncode(msg.kind, msg.col, msg.row, msg.button, msg.mods, msg.up ?? false)
+        : ''
+      if (data) {
+        pane.post({ type: 'reply', data })
+      }
+      return
+    }
+    case 'query':
+      answerPaneQuery(pane, msg)
+  }
+}

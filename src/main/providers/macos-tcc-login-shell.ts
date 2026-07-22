@@ -1,0 +1,278 @@
+import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { userInfo } from 'node:os'
+
+const MACOS_LOGIN_PATH = '/usr/bin/login'
+const MACOS_ENV_PATH = '/usr/bin/env'
+const MACOS_PRINTF_PATH = '/usr/bin/printf'
+const LOGIN_PREFLIGHT_TIMEOUT_MS = 500
+const LOGIN_PREFLIGHT_MARKER = 'ORCA_LOGIN_PREFLIGHT_OK'
+const LOGIN_PREFLIGHT_MAX_BUFFER_BYTES = 1024
+const LOGIN_PREFLIGHT_RETRY_BASE_MS = 5_000
+const LOGIN_PREFLIGHT_RETRY_MAX_MS = 5 * 60_000
+
+/**
+ * Env escape hatch to force the plain (unwrapped) spawn. Set to `1`/`true` if a
+ * user's environment misbehaves under login(1); terminals fall back to today's
+ * direct-spawn behavior.
+ */
+const DISABLE_ENV_VAR = 'ORCA_DISABLE_MACOS_LOGIN_SHELL'
+
+export type MacosTccLoginPreflightReason =
+  | 'supported'
+  | 'pam-rejected'
+  | 'timeout'
+  | 'output-limit'
+  | 'unexpected-output'
+  | 'exec-error'
+
+export type MacosTccLoginPreflightResult = {
+  enabled: boolean
+  reason: MacosTccLoginPreflightReason
+  retryable: boolean
+  retryAfterMs?: number
+}
+
+type LoginPreflightError = Error & {
+  code?: string | number | null
+  killed?: boolean
+}
+
+type TransientLoginPreflightFailure = {
+  failureCount: number
+  reason: MacosTccLoginPreflightReason
+  retryAtMs: number
+}
+
+let cachedLoginPreflightResult: MacosTccLoginPreflightResult | null = null
+let transientLoginPreflightFailure: TransientLoginPreflightFailure | null = null
+let loginPreflightInFlight: Promise<MacosTccLoginPreflightResult> | null = null
+
+function isDisabledByEnv(): boolean {
+  const value = process.env[DISABLE_ENV_VAR]
+  return value === '1' || value === 'true'
+}
+
+function retryDelayMs(failureCount: number): number {
+  return Math.min(
+    LOGIN_PREFLIGHT_RETRY_MAX_MS,
+    LOGIN_PREFLIGHT_RETRY_BASE_MS * 2 ** Math.max(0, failureCount - 1)
+  )
+}
+
+function classifyLoginPreflight(
+  error: LoginPreflightError | null,
+  stdout: string
+): Omit<MacosTccLoginPreflightResult, 'retryAfterMs'> {
+  // Why: the probe uses pipes while production uses a PTY. Treat ambiguous
+  // output as retryable so a tty-sensitive PAM stack is never disabled forever.
+  if (error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+    return { enabled: false, reason: 'output-limit', retryable: true }
+  }
+  if (error?.code === 'ETIMEDOUT' || error?.killed) {
+    return { enabled: false, reason: 'timeout', retryable: true }
+  }
+  if (!error && stdout === LOGIN_PREFLIGHT_MARKER) {
+    return { enabled: true, reason: 'supported', retryable: false }
+  }
+  if (/Login incorrect|(?:^|\n)login:\s*/i.test(stdout)) {
+    return { enabled: false, reason: 'pam-rejected', retryable: false }
+  }
+  if (error) {
+    return { enabled: false, reason: 'exec-error', retryable: true }
+  }
+  return { enabled: false, reason: 'unexpected-output', retryable: true }
+}
+
+function runLoginPreflight(
+  username: string,
+  accountHome: string
+): Promise<Omit<MacosTccLoginPreflightResult, 'retryAfterMs'>> {
+  return new Promise((resolve) => {
+    try {
+      const child = execFile(
+        MACOS_LOGIN_PATH,
+        ['-flpq', username, MACOS_PRINTF_PATH, LOGIN_PREFLIGHT_MARKER],
+        {
+          // Why: detached daemons can outlive their launch worktree. The PAM
+          // probe must not inherit a deleted cwd before PTY spawn repairs it.
+          cwd: accountHome,
+          encoding: 'utf8',
+          // Why: PAM policy can wait indefinitely. Bound both child lifetime and
+          // captured diagnostics without blocking the PTY host's event loop.
+          killSignal: 'SIGKILL',
+          maxBuffer: LOGIN_PREFLIGHT_MAX_BUFFER_BYTES,
+          timeout: LOGIN_PREFLIGHT_TIMEOUT_MS
+        },
+        (error, stdout) => {
+          // login(1) can return zero after an EOF-driven failed prompt, so only the
+          // requested child program's output plus a clean exit proves PAM accepted it.
+          resolve(classifyLoginPreflight(error, stdout))
+        }
+      )
+      // Why: login(1) must see immediate EOF, not an interactive pipe, so a PAM
+      // rejection exits instead of waiting at `login:` until the timeout.
+      child.stdin?.end()
+    } catch (error) {
+      resolve(classifyLoginPreflight(error as LoginPreflightError, ''))
+    }
+  })
+}
+
+function getLoginPreflightResult(
+  username: string,
+  accountHome: string,
+  report?: (result: MacosTccLoginPreflightResult) => void
+): Promise<MacosTccLoginPreflightResult> {
+  if (cachedLoginPreflightResult) {
+    return Promise.resolve(cachedLoginPreflightResult)
+  }
+
+  const now = Date.now()
+  if (transientLoginPreflightFailure && now < transientLoginPreflightFailure.retryAtMs) {
+    return Promise.resolve({
+      enabled: false,
+      reason: transientLoginPreflightFailure.reason,
+      retryable: true,
+      retryAfterMs: transientLoginPreflightFailure.retryAtMs - now
+    })
+  }
+
+  if (!loginPreflightInFlight) {
+    // Why: simultaneous pane restores share one PAM child instead of multiplying
+    // subprocesses at exactly the point terminal startup is already busiest.
+    loginPreflightInFlight = runLoginPreflight(username, accountHome)
+      .then((attempt) => {
+        let result: MacosTccLoginPreflightResult = attempt
+        if (attempt.retryable) {
+          const failureCount = (transientLoginPreflightFailure?.failureCount ?? 0) + 1
+          const delayMs = retryDelayMs(failureCount)
+          transientLoginPreflightFailure = {
+            failureCount,
+            reason: attempt.reason,
+            retryAtMs: Date.now() + delayMs
+          }
+          result = { ...attempt, retryAfterMs: delayMs }
+        } else {
+          cachedLoginPreflightResult = attempt
+          transientLoginPreflightFailure = null
+        }
+
+        try {
+          report?.(result)
+        } catch {
+          // Diagnostics must never affect whether a user's shell can spawn.
+        }
+        if (!report && !result.enabled) {
+          console.warn(`[pty] macOS login(1) preflight ${result.reason}; spawning shells directly`)
+        }
+        return result
+      })
+      .finally(() => {
+        loginPreflightInFlight = null
+      })
+  }
+  return loginPreflightInFlight
+}
+
+/**
+ * Resolves the PAM capability check before a fresh PTY is spawned. Callers
+ * await this at their async request boundary (#8985: the daemon adapter spawn
+ * boundary included) so existing terminals stay responsive while login(1) runs.
+ * Deterministic outcomes are cached; environmental failures retry with backoff.
+ */
+export async function prepareMacosTccLoginShell(
+  report?: (result: MacosTccLoginPreflightResult) => void
+): Promise<void> {
+  if (process.platform !== 'darwin' || isDisabledByEnv()) {
+    return
+  }
+  if (cachedLoginPreflightResult) {
+    return
+  }
+  if (!existsSync(MACOS_LOGIN_PATH)) {
+    return
+  }
+
+  let username: string
+  let accountHome: string
+  try {
+    const account = userInfo()
+    username = account.username
+    accountHome = account.homedir
+  } catch {
+    return
+  }
+  if (!username || !accountHome) {
+    return
+  }
+  await getLoginPreflightResult(username, accountHome, report)
+}
+
+export function resetMacosLoginShellPreflightForTests(): void {
+  cachedLoginPreflightResult = null
+  transientLoginPreflightFailure = null
+  loginPreflightInFlight = null
+}
+
+/**
+ * Wrap a macOS shell spawn in `/usr/bin/login -flpq <user> …` so terminal children
+ * get their own TCC identity instead of collapsing into Orca's bundle id — signed
+ * CLIs like `op` otherwise re-prompt every launch because tccd attributes the grant
+ * to Orca and never persists it (#6996). This mirrors how Terminal.app spawns shells.
+ *
+ * Why the env(1) interposition: login(1) overwrites SHELL from the account DB even
+ * under -p, so `/usr/bin/env SHELL=<shell>` re-asserts the shell Orca actually runs
+ * without disturbing login's attribution (skipped when the shell path contains `=`).
+ *
+ * No-op off macOS, when already wrapped, when disabled via {@link DISABLE_ENV_VAR},
+ * or when the login(1) PAM preflight rejected this process's user.
+ */
+export function wrapShellSpawnForMacosTccAttribution(
+  file: string,
+  args: string[],
+  env?: Record<string, string | undefined>
+): { file: string; args: string[] } {
+  if (process.platform !== 'darwin') {
+    return { file, args }
+  }
+  if (file === MACOS_LOGIN_PATH || isDisabledByEnv()) {
+    return { file, args }
+  }
+  if (!existsSync(MACOS_LOGIN_PATH)) {
+    return { file, args }
+  }
+
+  let username: string
+  try {
+    username = userInfo().username
+  } catch {
+    return { file, args }
+  }
+  if (!username) {
+    return { file, args }
+  }
+  // Why: fork divergence from upstream — a boundary that never awaited the
+  // preflight keeps today's wrap (never fail-open, which is how #8985's
+  // per-launch TCC prompts appeared upstream); only a preflight that actually
+  // ran and failed (PAM reject, or a transient failure pending its #9404
+  // retry) downgrades to a direct shell.
+  if (
+    cachedLoginPreflightResult
+      ? !cachedLoginPreflightResult.enabled
+      : transientLoginPreflightFailure !== null
+  ) {
+    return { file, args }
+  }
+
+  const shellEnvValue = env?.SHELL || file
+  const interposedShellEnv =
+    !file.includes('=') && existsSync(MACOS_ENV_PATH)
+      ? [MACOS_ENV_PATH, `SHELL=${shellEnvValue}`]
+      : []
+
+  return {
+    file: MACOS_LOGIN_PATH,
+    args: ['-flpq', username, ...interposedShellEnv, file, ...args]
+  }
+}

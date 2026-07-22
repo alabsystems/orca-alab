@@ -1,0 +1,369 @@
+// Builds one aterm engine per pane inside the SHARED render worker (CPU or GPU) and
+// normalizes the few CPU/GPU differences (process encoding, render/present,
+// framebuffer size, search arity) behind one EngineHandle. The worker terminal
+// (aterm-worker-terminal) drives reads/commands through this handle so it's
+// engine-agnostic. Each wasm module (aterm_wasm / aterm_gpu_web) is instantiated
+// ONCE for the whole worker — `init`/`gpuInit` are idempotent (wasm-bindgen caches
+// the instance) — so every engine of a kind shares one linear memory and the
+// engine-side content-keyed font intern registry dedupes the faces across panes.
+
+import init, { AtermTerminal } from './aterm_wasm.js'
+import wasmUrl from './aterm_wasm_bg.wasm?url'
+import gpuInit, { AtermGpuTerminal } from './aterm_gpu_web.js'
+import gpuWasmUrl from './aterm_gpu_web_bg.wasm?url'
+import { seedAtermPalette, seedAtermReplyDefaults } from './aterm-theme-colors'
+import {
+  applyEmojiFace,
+  applyTextFaces,
+  ensureFontHandles,
+  type RegisteredFontHandles,
+  type WorkerResidentFonts
+} from './aterm-worker-font-registry'
+import type { AtermThemeColors } from './aterm-theme-colors'
+import { copyBudgetedStep, type EngineBudgetedSearchStep } from './aterm-engine-budgeted-search'
+
+export type { WorkerResidentFonts } from './aterm-worker-font-registry'
+export type { EngineBudgetedSearchStep } from './aterm-engine-budgeted-search'
+
+// SINGLE-FLIGHT init per module: the glue's idempotency guard (`if (wasm !==
+// undefined) return`) is race-able — overlapping FIRST init() calls (concurrent
+// pane builds at worker boot) each instantiate the module and the second
+// CLOBBERS the glue's module-level `wasm` binding. Engines built against the
+// first instance then dereference into the second instance's memory: the
+// worker's `memory access out of bounds` crashes, and module state (the font
+// registry, the heap measurement) splits across instances. Memoizing the
+// PROMISE guarantees one instance per module for the worker's lifetime.
+let cpuInitPromise: ReturnType<typeof init> | null = null
+let gpuInitPromise: ReturnType<typeof gpuInit> | null = null
+
+/** The read + command surface BOTH engines expose identically; the worker terminal
+ *  uses only this. `search` (arity differs) + render/process (encoding differs) are
+ *  normalized on EngineHandle, not here. */
+export type WorkerEngine = Pick<
+  AtermTerminal,
+  | 'cursor_x'
+  | 'cursor_y'
+  | 'cursor_style'
+  | 'cursor_color'
+  | 'cell_width'
+  | 'cell_height'
+  | 'base_y'
+  | 'display_offset'
+  | 'display_origin_absolute'
+  | 'is_alt_screen'
+  | 'bracketed_paste_mode'
+  | 'is_mouse_tracking'
+  | 'mouse_wants_motion'
+  | 'mouse_wants_any_motion'
+  | 'is_focus_event_mode'
+  | 'is_color_scheme_updates_mode'
+  | 'is_app_cursor_mode'
+  | 'is_alternate_scroll'
+  | 'keyboard_mode_bits'
+  | 'row_text'
+  | 'row_len'
+  | 'row_is_wrapped'
+  | 'cell_text'
+  | 'cell_is_wide'
+  | 'selection_text'
+  | 'selection_range'
+  | 'selection_start'
+  | 'selection_extend'
+  | 'selection_finish'
+  | 'selection_clear'
+  | 'selection_word'
+  | 'selection_line'
+  | 'link_at'
+  | 'scroll_lines'
+  | 'scroll_px'
+  | 'scroll_to_bottom'
+  | 'scroll_to_top'
+  | 'scroll_search_line_into_view'
+  | 'search_display_origin'
+  | 'serialize'
+  | 'serialize_scrollback'
+  | 'drain_bell'
+  | 'take_missing_font_classes'
+  | 'take_osc_events'
+  | 'take_response'
+  | 'title'
+  | 'resize'
+  | 'set_px'
+  | 'set_line_height'
+  | 'set_ligatures'
+  | 'set_scrollback_limit'
+  | 'set_default_cursor_style'
+  | 'set_color_scheme'
+  | 'set_theme'
+  | 'set_default_foreground'
+  | 'set_default_background'
+  | 'set_palette_color'
+  | 'set_selection_fg'
+  | 'set_selection_inactive'
+  | 'set_selection_inactive_bg'
+  | 'set_cursor_blink_phase'
+  | 'set_cursor_hollow'
+  | 'advance_effects'
+  | 'is_effects_active'
+  | 'effects_next_deadline_ms'
+  | 'set_effects_focused'
+  | 'set_effects_visibility'
+  | 'note_keystroke'
+  | 'set_sparkle_words_enabled'
+  | 'set_sparkle_classes'
+  | 'set_sparkle_reduced_motion'
+  | 'set_matrix_rain_enabled'
+  | 'set_matrix_rain'
+  | 'set_matrix_rain_reduced_motion'
+  | 'note_matrix_rain_alt_scroll'
+  | 'set_cursor_glow'
+  | 'set_chrome'
+  | 'set_fallback_font'
+  | 'add_fallback_font'
+  | 'set_emoji_font'
+  | 'set_symbol_font'
+  | 'set_primary_font'
+  | 'set_bold_font'
+  | 'set_cell_pixel_size'
+  | 'authorize_clipboard_write'
+  | 'revoke_clipboard_write'
+  | 'authorize_notifications'
+  | 'take_notifications'
+  | 'encode_mouse_press'
+  | 'encode_mouse_release'
+  | 'encode_mouse_motion'
+  | 'encode_mouse_wheel'
+  // Predictive echo (mosh-style): both engines export the same predictor seam. The
+  // worker drives it from posted predict* commands and reflects overlay + deadline.
+  | 'set_predictive_echo'
+  | 'predict_char'
+  | 'predict_backspace'
+  | 'predict_line_submit'
+  | 'predict_reconcile'
+  | 'predict_overlay'
+  | 'predict_next_deadline_ms'
+  | 'predict_reset'
+  | 'free'
+> & {
+  /** Optional while Orca and aterm generated artifacts roll independently. */
+  note_matrix_rain_signal?: (code: number, weight: number) => void
+}
+
+/** The per-pane engine + the normalized hot-path ops the worker terminal drives. */
+export type EngineHandle = {
+  kind: 'cpu' | 'gpu'
+  engine: WorkerEngine
+  /** The engine module's linear memory — the spill compositor reads the
+   *  chrome-band export straight out of it (rgba_ptr discipline). */
+  memory: WebAssembly.Memory
+  /** Feed bytes (CPU: process_str; GPU: process(encode)). */
+  process: (data: string) => void
+  /** Render the current grid to the OffscreenCanvas (CPU: rasterize→2d blit; GPU:
+   *  WebGL2 present, no readback). */
+  render: () => void
+  /** Device-pixel framebuffer size after the last render. */
+  framebuffer: () => { width: number; height: number }
+  /** Run the engine search; both CPU and GPU honor isRegex (3-arg parity). */
+  search: (query: string, caseSensitive: boolean, isRegex: boolean) => Uint32Array
+  /** Budgeted resumable search (P1.1): at most `rowBudget` rows of index +
+   *  verify work per call; pass the returned cursor to continue, or a
+   *  different pattern / stale cursor to restart. Optional while Orca and
+   *  aterm generated artifacts roll independently (absent → one-shot search). */
+  searchBudgeted?: (
+    query: string,
+    caseSensitive: boolean,
+    isRegex: boolean,
+    cursor: bigint | undefined,
+    rowBudget: number
+  ) => EngineBudgetedSearchStep
+  /** Drop any in-flight budgeted search state (frees the partial index). */
+  searchBudgetedCancel?: () => void
+  dispose: () => void
+}
+
+/** Per-pane construction params the worker keeps so a GPU→CPU fallback can rebuild on
+ *  the same canvas (it was transferred and can't be re-sent). Fonts are a REFERENCE
+ *  to the worker-resident faces, never a per-pane copy. */
+export type StoredInit = {
+  fonts: WorkerResidentFonts
+  rows: number
+  cols: number
+  fontPx: number
+  lineHeight: number
+  themeColors: AtermThemeColors
+}
+
+/** Font + theme seeding both engines share; byte-for-byte the main-thread drawers'
+ *  setup so the worker engine matches what the main path would have produced. */
+type SeedTarget = Pick<
+  AtermTerminal,
+  | 'cell_width'
+  | 'cell_height'
+  | 'set_fallback_font_registered'
+  | 'add_fallback_font_registered'
+  | 'set_emoji_font_registered'
+  | 'set_symbol_font_registered'
+  | 'set_palette_color'
+  | 'set_selection_fg'
+  | 'set_selection_inactive_bg'
+  | 'set_default_foreground'
+  | 'set_default_background'
+  | 'set_cell_pixel_size'
+  | 'set_line_height'
+>
+
+function seedEngine(t: SeedTarget, p: StoredInit, h: RegisteredFontHandles): void {
+  // Faces resident at build time (E1: usually just the primary; classes an
+  // earlier miss already pulled in apply here so late panes get them too).
+  applyTextFaces(t, h)
+  applyEmojiFace(t, h)
+  // Apply the user's line-height before metrics are read so the grid is sized to the
+  // real cell box from frame 1.
+  t.set_line_height(p.lineHeight)
+  seedAtermPalette(t, p.themeColors)
+  t.set_selection_fg(p.themeColors.selectionForeground ?? undefined)
+  t.set_selection_inactive_bg(p.themeColors.selectionInactive ?? undefined)
+  seedAtermReplyDefaults(t, p.themeColors, t.cell_width, t.cell_height)
+}
+
+// The wasm modules' linear memories (one per module; all engines of a kind share
+// it — fonts intern module-wide). Exposed so the worker's state message can report
+// the true wasm footprint (the E1 font-dedup gate measures marginal heap per pane;
+// process RSS cannot resolve that signal against GC noise).
+let cpuWasmMemory: WebAssembly.Memory | null = null
+let gpuWasmMemory: WebAssembly.Memory | null = null
+
+export function workerWasmHeapBytes(): number {
+  return (cpuWasmMemory?.buffer.byteLength ?? 0) + (gpuWasmMemory?.buffer.byteLength ?? 0)
+}
+
+// TEMP DIAGNOSTIC
+/** CPU engine: rasterize → zero-copy 2d blit (identical to the main-thread painter). */
+export async function buildCpuEngine(
+  p: StoredInit,
+  canvas: OffscreenCanvas
+): Promise<EngineHandle> {
+  const out = await (cpuInitPromise ??= init({ module_or_path: wasmUrl }))
+  const memory = out.memory
+  cpuWasmMemory = memory
+  // Register the worker-resident faces ONCE per module; this and every later
+  // pane build constructs + seeds from 4-byte handles (no per-pane blob marshal).
+  // Incremental: a class delivered since the last build registers its new blobs.
+  const cpuFontHandles = ensureFontHandles('cpu', p.fonts)
+  const t = AtermTerminal.new_registered(
+    p.rows,
+    p.cols,
+    cpuFontHandles.primary,
+    p.fontPx,
+    p.themeColors.fg,
+    p.themeColors.bg,
+    p.themeColors.cursor,
+    p.themeColors.selection
+  )
+  seedEngine(t, p, cpuFontHandles)
+  const canvasCtx = canvas.getContext('2d')
+  if (!canvasCtx) {
+    t.free()
+    throw new Error('OffscreenCanvas 2d context unavailable')
+  }
+  let width = 0
+  let height = 0
+  const render = (): void => {
+    t.render()
+    width = t.width
+    height = t.height
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width
+      canvas.height = height
+    }
+    const view = new Uint8ClampedArray(memory.buffer, t.rgba_ptr(), width * height * 4)
+    canvasCtx.putImageData(new ImageData(view, width, height), 0, 0)
+  }
+  return {
+    kind: 'cpu',
+    engine: t,
+    memory,
+    process: (data) => t.process_str(data),
+    render,
+    framebuffer: () => ({ width, height }),
+    search: (q, cs, regex) => t.search(q, cs, regex),
+    searchBudgeted: (q, cs, regex, cursor, rowBudget) =>
+      copyBudgetedStep(t.search_budgeted(q, cs, regex, cursor, rowBudget)),
+    searchBudgetedCancel: () => t.search_budgeted_cancel(),
+    dispose: () => {
+      try {
+        t.free()
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+// GPU process has no string entry; one encoder avoids a per-chunk alloc.
+const textEncoder = new TextEncoder()
+
+/** GPU engine: WebGL2 present straight to the swapchain — NO rgba blit. `init_offscreen`
+ *  is async and MUST finish before any render; it throws if WebGL is unavailable in the
+ *  worker → caller posts an init error so the main side falls back to a CPU worker. */
+export async function buildGpuEngine(
+  p: StoredInit,
+  canvas: OffscreenCanvas
+): Promise<EngineHandle> {
+  const gpuOut = await (gpuInitPromise ??= gpuInit({ module_or_path: gpuWasmUrl }))
+  gpuWasmMemory = gpuOut.memory
+  const rows = p.rows
+  const cols = p.cols
+  // The GPU module has its own linear memory — its own one-time registration.
+  const gpuFontHandles = ensureFontHandles('gpu', p.fonts)
+  const t = AtermGpuTerminal.new_registered(
+    p.rows,
+    p.cols,
+    gpuFontHandles.primary,
+    p.fontPx,
+    p.themeColors.fg,
+    p.themeColors.bg,
+    p.themeColors.cursor,
+    p.themeColors.selection
+  )
+  // Seed BEFORE init_offscreen so the engine re-applies fonts/theme to the GPU face it
+  // builds there (matches aterm-gpu-drawer's seed-then-init ordering).
+  seedEngine(t as unknown as SeedTarget, p, gpuFontHandles)
+  try {
+    await t.init_offscreen(canvas)
+  } catch (err) {
+    try {
+      t.free()
+    } catch {
+      /* ignore */
+    }
+    throw err
+  }
+  const engine = t as unknown as WorkerEngine
+  return {
+    kind: 'gpu',
+    engine,
+    memory: gpuOut.memory,
+    process: (data) => t.process(textEncoder.encode(data)),
+    render: () => t.render(),
+    // The presented swapchain canvas carries the framebuffer size; fall back to grid-
+    // derived device px before the first present sizes it.
+    framebuffer: () => ({
+      width: canvas.width || Math.round(cols * engine.cell_width),
+      height: canvas.height || Math.round(rows * engine.cell_height)
+    }),
+    // GPU search now forwards isRegex (parity with the CPU binding after the aterm
+    // 3-arg widening), so regex search works on the default GPU worker path.
+    search: (q, cs, regex) => t.search(q, cs, regex),
+    searchBudgeted: (q, cs, regex, cursor, rowBudget) =>
+      copyBudgetedStep(t.search_budgeted(q, cs, regex, cursor, rowBudget)),
+    searchBudgetedCancel: () => t.search_budgeted_cancel(),
+    dispose: () => {
+      try {
+        t.free()
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
