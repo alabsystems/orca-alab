@@ -1,0 +1,264 @@
+import { spawn } from 'node:child_process'
+import { delimiter } from 'node:path'
+import type { ShellHydrationFailureReason } from '../../shared/types'
+import { isNushellExecutableName } from '../../shared/nushell-shell'
+import { applyShellStartupPathFiles } from './shell-startup-path'
+
+// Why: GUI-launched Electron on macOS/Linux inherits a minimal PATH from launchd
+// that does not include dirs appended by the user's shell rc files (~/.zshrc,
+// ~/.bashrc). Tools installed into ~/.opencode/bin, ~/.cargo/bin, pyenv/volta
+// shims, and countless other user-local locations end up invisible to our
+// `which` probe even though they work fine from Terminal (see stablyai/orca#829).
+//
+// Rather than play whack-a-mole adding every agent's install dir to a hardcoded
+// list, we ask the user's login shell for PATH once and statically scan simple
+// rc-file PATH edits that are safe to read without executing interactive init.
+
+const DELIMITER = '__ORCA_SHELL_PATH__'
+const SPAWN_TIMEOUT_MS = 5000
+
+// ANSI escape sequences can leak into the captured output when the user's rc
+// files print banners or set colored prompts. Strip them before parsing.
+const ANSI_RE = /\x1b\[[0-9;?]*[A-Za-z]/g // eslint-disable-line no-control-regex
+
+// Why: the discriminator lets telemetry classify *why* hydration failed, not
+// just whether it did. Five resolve sites in this file each tag the result
+// with the right reason. The shared alias keeps the enum in lockstep with the
+// telemetry schema (compile-time guard in telemetry-events.ts).
+export type HydrationResult =
+  | { ok: true; segments: string[]; failureReason: 'none' }
+  | {
+      ok: false
+      segments: []
+      failureReason: Exclude<ShellHydrationFailureReason, 'none'>
+    }
+
+let cached: Promise<HydrationResult> | null = null
+
+/** @internal - tests need a clean hydration cache between cases. */
+export function _resetHydrateShellPathCache(): void {
+  cached = null
+}
+
+function pickShell(): string | null {
+  if (process.platform === 'win32') {
+    return null
+  }
+  const shell = process.env.SHELL
+  if (shell && shell.length > 0) {
+    return shell
+  }
+  return process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash'
+}
+
+function parseCapturedPath(stdout: string): string[] {
+  const cleaned = stdout.replace(ANSI_RE, '')
+  const first = cleaned.indexOf(DELIMITER)
+  if (first < 0) {
+    return []
+  }
+  const second = cleaned.indexOf(DELIMITER, first + DELIMITER.length)
+  if (second < 0) {
+    return []
+  }
+  const value = cleaned.slice(first + DELIMITER.length, second).trim()
+  if (!value) {
+    return []
+  }
+  // Why: Set preserves insertion order, and PATH resolution is first-match-wins,
+  // so de-duping this way keeps the user's rc-file ordering intact.
+  return [
+    ...new Set(
+      value
+        .split(delimiter)
+        .map((s) => s.trim())
+        .filter(Boolean)
+    )
+  ]
+}
+
+function parseCurrentProcessPath(): string[] {
+  return (process.env.PATH ?? '')
+    .split(delimiter)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+function addStaticStartupPathSegments(shell: string, result: HydrationResult): HydrationResult {
+  const baseSegments = result.ok ? result.segments : parseCurrentProcessPath()
+  const staticPath = applyShellStartupPathFiles(shell, baseSegments)
+  if (result.ok || staticPath.changed) {
+    return { segments: staticPath.segments, ok: true, failureReason: 'none' }
+  }
+  return result
+}
+
+/** @internal - exported so tests can pin the per-dialect probe argv. */
+export function buildShellPathProbeArgv(shell: string): string[] {
+  // Why: printing $PATH between delimiters is resilient to rc-file banners,
+  // MOTDs, and `echo` invocations that shells like fish print unprompted.
+  // Why: use login-but-non-interactive (`-lc`, not `-ilc`) so login PATH
+  // files run without spawn-heavy interactive init wedging macOS ES agents.
+  if (isNushellExecutableName(shell)) {
+    // Why: nu rejects combined -lc, and the sh child sees nu's ENV_CONVERSIONS-converted
+    // PATH; the sh body avoids single quotes because nu single-quoted strings have no escapes.
+    return ['-l', '-c', `^sh -c 'printf %s%s%s ${DELIMITER} "$PATH" ${DELIMITER}'`]
+  }
+  const command = `printf '%s' '${DELIMITER}'; printf '%s' "$PATH"; printf '%s' '${DELIMITER}'`
+  return ['-lc', command]
+}
+
+function spawnShellAndReadPath(shell: string): Promise<HydrationResult> {
+  return new Promise((resolve) => {
+    let finished = false
+    let stdout = ''
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const child = spawn(shell, buildShellPathProbeArgv(shell), {
+      // Why: inherit current env so the shell sees the same baseline, then let
+      // it layer its own rc files on top. Do NOT forward stdio — some shells
+      // (oh-my-zsh setups, powerlevel10k) print a lot to stderr on startup,
+      // and we don't want that in Orca's console.
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      // Why: own process group so a timeout can kill rc-spawned descendants, not just the shell (#5657).
+      detached: true
+    })
+    // Why: the probe is disposable — it must never hold the app open if it wedges under a macOS ES agent.
+    child.unref()
+
+    const cleanup = (): void => {
+      if (timer) {
+        clearTimeout(timer)
+        timer = null
+      }
+      child.stdout.off('data', onStdoutData)
+      child.off('error', onError)
+      child.off('close', onClose)
+    }
+    const finish = (result: HydrationResult): void => {
+      if (finished) {
+        return
+      }
+      finished = true
+      cleanup()
+      resolve(result)
+    }
+
+    timer = setTimeout(() => {
+      // Why: slow rc files (corporate env setup, nvm eager init) can exceed
+      // our budget. Kill the shell and fall back to process.env rather than
+      // blocking the Agents pane indefinitely. Defense-in-depth only: a child
+      // in kernel sleep may ignore SIGKILL, so avoiding `-i` is the real fix.
+      try {
+        // Why: negative pid targets the probe's whole group; a bare kill strands grandchildren.
+        if (typeof child.pid === 'number') {
+          process.kill(-child.pid, 'SIGKILL')
+        } else {
+          child.kill('SIGKILL')
+        }
+      } catch {
+        try {
+          child.kill('SIGKILL')
+        } catch {
+          // ignore
+        }
+      }
+      finish(
+        addStaticStartupPathSegments(shell, { segments: [], ok: false, failureReason: 'timeout' })
+      )
+    }, SPAWN_TIMEOUT_MS)
+
+    const onStdoutData = (chunk: Buffer): void => {
+      stdout += chunk.toString('utf8')
+    }
+
+    const onError = (): void => {
+      finish(
+        addStaticStartupPathSegments(shell, {
+          segments: [],
+          ok: false,
+          failureReason: 'spawn_error'
+        })
+      )
+    }
+
+    const onClose = (): void => {
+      const segments = parseCapturedPath(stdout)
+      if (segments.length === 0) {
+        finish(
+          addStaticStartupPathSegments(shell, {
+            segments: [],
+            ok: false,
+            failureReason: 'empty_path'
+          })
+        )
+        return
+      }
+      finish(addStaticStartupPathSegments(shell, { segments, ok: true, failureReason: 'none' }))
+    }
+
+    child.stdout.on('data', onStdoutData)
+    child.on('error', onError)
+    child.on('close', onClose)
+  })
+}
+
+type HydrateOptions = {
+  force?: boolean
+  /** Override for tests — defaults to running `spawn` against the real shell. */
+  spawner?: (shell: string) => Promise<HydrationResult>
+  /** Override for tests — defaults to `pickShell()`. */
+  shellOverride?: string | null
+}
+
+/**
+ * Spawn the user's login shell once and return the PATH it would export.
+ * Caches the promise for the lifetime of the process — call
+ * `_resetHydrateShellPathCache()` in tests or `hydrateShellPath({ force: true })`
+ * when the user asks to re-probe (e.g. after installing a new CLI).
+ */
+export function hydrateShellPath(options: HydrateOptions = {}): Promise<HydrationResult> {
+  if (cached && !options.force) {
+    return cached
+  }
+  const shell = options.shellOverride !== undefined ? options.shellOverride : pickShell()
+  if (!shell) {
+    // Windows uses cmd/PowerShell rather than a POSIX login shell — the
+    // `patchPackagedProcessPath` static list is sufficient there.
+    cached = Promise.resolve({ segments: [], ok: false, failureReason: 'no_shell' })
+    return cached
+  }
+  cached = (options.spawner ?? spawnShellAndReadPath)(shell)
+  return cached
+}
+
+/**
+ * Promote shell-discovered PATH segments to the front of process.env.PATH,
+ * preserving shell ordering and avoiding duplicates. Returns the segments that
+ * were newly added so callers can log/telemetry on nontrivial hydrations.
+ */
+export function mergePathSegments(segments: string[]): string[] {
+  if (segments.length === 0) {
+    return []
+  }
+  const current = process.env.PATH ?? ''
+  const currentSegments = current.split(delimiter).filter(Boolean)
+  const shellSegments = [...new Set(segments)]
+  const shellSegmentSet = new Set(shellSegments)
+  const existing = new Set(currentSegments)
+  const added = shellSegments.filter((segment) => !existing.has(segment))
+  const merged = [
+    ...shellSegments,
+    ...currentSegments.filter((segment) => !shellSegmentSet.has(segment))
+  ]
+  const next = merged.join(delimiter)
+  if (next === current) {
+    return []
+  }
+  // Why: shell-provided entries must win over hardcoded packaged-app fallbacks.
+  // A seeded fallback can point at a stale CLI while the user's shell resolves
+  // a healthy one from the same directory list in a different order.
+  process.env.PATH = next
+  return added
+}

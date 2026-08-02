@@ -1,0 +1,294 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  getTerminalWebglAutoDecision,
+  isLinuxRendererHost,
+  resetTerminalWebglAutoDecision
+} from './terminal-webgl-auto-policy'
+
+type MockWebglRendererInfo = {
+  renderer?: string | null
+  vendor?: string | null
+  hasWebgl2?: boolean
+  hasDebugInfo?: boolean
+}
+
+function stubNavigator(platform: string, userAgent: string): void {
+  vi.stubGlobal('navigator', { platform, userAgent })
+}
+
+function stubWebglRendererInfo({
+  renderer = 'Mesa Intel(R) Graphics',
+  vendor = 'Intel',
+  hasWebgl2 = true,
+  hasDebugInfo = true
+}: MockWebglRendererInfo): void {
+  const rendererKey = 0x9246
+  const vendorKey = 0x9245
+  const gl = {
+    getExtension: vi.fn(() =>
+      hasDebugInfo
+        ? {
+            UNMASKED_RENDERER_WEBGL: rendererKey,
+            UNMASKED_VENDOR_WEBGL: vendorKey
+          }
+        : null
+    ),
+    getParameter: vi.fn((key: number) => {
+      if (key === rendererKey) {
+        return renderer
+      }
+      if (key === vendorKey) {
+        return vendor
+      }
+      return null
+    })
+  }
+
+  vi.stubGlobal('document', {
+    createElement: vi.fn((tagName: string) => {
+      if (tagName === 'canvas') {
+        return {
+          getContext: vi.fn((contextName: string) =>
+            hasWebgl2 && contextName === 'webgl2' ? gl : null
+          )
+        }
+      }
+      return {}
+    })
+  })
+}
+
+function stubNoDocument(): void {
+  vi.stubGlobal('document', undefined)
+}
+
+function stubDisplayServer(displayServer: 'wayland' | 'x11' | null): void {
+  vi.stubGlobal('window', {
+    api: {
+      platform: {
+        get: () => ({
+          platform: 'linux',
+          osRelease: '',
+          displayServer
+        })
+      }
+    }
+  })
+}
+
+describe('terminal WebGL auto policy', () => {
+  beforeEach(() => {
+    resetTerminalWebglAutoDecision()
+  })
+
+  afterEach(() => {
+    resetTerminalWebglAutoDecision()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('detects Linux hosts from platform or user agent', () => {
+    expect(isLinuxRendererHost('Linux x86_64', 'Mozilla/5.0')).toBe(true)
+    expect(isLinuxRendererHost('MacIntel', 'Mozilla/5.0 (X11; Linux x86_64)')).toBe(true)
+    expect(isLinuxRendererHost('MacIntel', 'Mozilla/5.0 (Macintosh)')).toBe(false)
+    expect(isLinuxRendererHost('Linux x86_64', 'Node.js/24')).toBe(false)
+  })
+
+  it('allows non-Linux auto panes when the renderer identity is unknown (no debug ext)', () => {
+    stubNavigator('MacIntel', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)')
+    stubNoDocument()
+
+    expect(getTerminalWebglAutoDecision()).toMatchObject({
+      allowWebgl: true,
+      reason: 'non-linux-renderer-unknown'
+    })
+  })
+
+  it('allows non-Linux auto panes for identifiable hardware renderers', () => {
+    stubNavigator('MacIntel', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)')
+    stubWebglRendererInfo({ renderer: 'Apple M2', vendor: 'Apple' })
+
+    expect(getTerminalWebglAutoDecision()).toEqual({
+      allowWebgl: true,
+      reason: 'non-linux-hardware-renderer',
+      renderer: 'Apple M2',
+      vendor: 'Apple'
+    })
+  })
+
+  it.each([
+    ['MacIntel', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 'SwiftShader'],
+    [
+      'Win32',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      'ANGLE (Microsoft, Microsoft Basic Render Driver Direct3D11 vs_5_0 ps_5_0)'
+    ],
+    ['Win32', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'llvmpipe (LLVM 17.0.6, 256 bits)'],
+    ['MacIntel', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 'Apple Software Renderer']
+  ])('blocks non-Linux auto panes on a software renderer (%s / %s)', (platform, ua, renderer) => {
+    stubNavigator(platform, ua)
+    stubWebglRendererInfo({ renderer, vendor: 'Google Inc.' })
+
+    expect(getTerminalWebglAutoDecision()).toMatchObject({
+      allowWebgl: false,
+      reason: 'non-linux-software-renderer',
+      renderer
+    })
+  })
+
+  it('allows Linux auto panes for identifiable hardware renderers', () => {
+    stubNavigator('Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64)')
+    stubWebglRendererInfo({
+      renderer: 'Mesa Intel(R) UHD Graphics 770 (ADL-S GT1)',
+      vendor: 'Intel'
+    })
+
+    expect(getTerminalWebglAutoDecision()).toEqual({
+      allowWebgl: true,
+      reason: 'linux-hardware-renderer',
+      renderer: 'Mesa Intel(R) UHD Graphics 770 (ADL-S GT1)',
+      vendor: 'Intel'
+    })
+  })
+
+  // Wayland decision table: the #5319-era unconditional CPU gate is narrowed to
+  // the one config still awaiting a real-rig re-test (NVIDIA proprietary). Open
+  // Mesa drivers ride the GPU path; aterm's init-timeout + CPU fallback is the
+  // runtime safety net.
+  it.each([
+    ['Intel Mesa', 'Mesa Intel(R) UHD Graphics 770 (ADL-S GT1)', 'Intel'],
+    ['AMD radeonsi', 'AMD Radeon RX 7800 XT (radeonsi, navi32, LLVM 17.0.6)', 'AMD'],
+    ['nouveau', 'NV137', 'nouveau'],
+    ['NVK via zink', 'zink Vulkan 1.3 (NVK AD102)', 'Mesa']
+  ])('allows Wayland auto panes on open hardware drivers (%s)', (_label, renderer, vendor) => {
+    stubNavigator('Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64)')
+    stubDisplayServer('wayland')
+    stubWebglRendererInfo({ renderer, vendor })
+
+    expect(getTerminalWebglAutoDecision()).toEqual({
+      allowWebgl: true,
+      reason: 'linux-hardware-renderer',
+      renderer,
+      vendor
+    })
+  })
+
+  it.each([
+    ['NVIDIA GeForce RTX 3080/PCIe/SSE2', 'NVIDIA Corporation'],
+    ['ANGLE (NVIDIA, NVIDIA GeForce RTX 4090, OpenGL 4.5.0 NVIDIA 550.54.14)', 'Google Inc.']
+  ])(
+    'keeps Wayland auto panes on CPU for the NVIDIA proprietary stack (%s)',
+    (renderer, vendor) => {
+      stubNavigator('Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64)')
+      stubDisplayServer('wayland')
+      stubWebglRendererInfo({ renderer, vendor })
+
+      expect(getTerminalWebglAutoDecision()).toEqual({
+        allowWebgl: false,
+        reason: 'linux-wayland-nvidia-proprietary',
+        renderer,
+        vendor
+      })
+    }
+  )
+
+  it('allows NVIDIA proprietary on X11 — the denylist is Wayland-scoped', () => {
+    stubNavigator('Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64)')
+    stubDisplayServer('x11')
+    stubWebglRendererInfo({
+      renderer: 'NVIDIA GeForce RTX 3080/PCIe/SSE2',
+      vendor: 'NVIDIA Corporation'
+    })
+
+    expect(getTerminalWebglAutoDecision()).toMatchObject({
+      allowWebgl: true,
+      reason: 'linux-hardware-renderer'
+    })
+  })
+
+  it('allows NVIDIA proprietary when the display server is unknown', () => {
+    // Only a CONFIRMED Wayland session applies the wedge denylist — an unknown
+    // display server keeps the historical hardware-renderer default.
+    stubNavigator('Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64)')
+    stubDisplayServer(null)
+    stubWebglRendererInfo({
+      renderer: 'NVIDIA GeForce RTX 3080/PCIe/SSE2',
+      vendor: 'NVIDIA Corporation'
+    })
+
+    expect(getTerminalWebglAutoDecision()).toMatchObject({
+      allowWebgl: true,
+      reason: 'linux-hardware-renderer'
+    })
+  })
+
+  it('still blocks software renderers on Wayland ahead of the NVIDIA denylist', () => {
+    stubNavigator('Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64)')
+    stubDisplayServer('wayland')
+    stubWebglRendererInfo({ renderer: 'llvmpipe (LLVM 17.0.6, 256 bits)', vendor: 'Mesa/X.org' })
+
+    expect(getTerminalWebglAutoDecision()).toMatchObject({
+      allowWebgl: false,
+      reason: 'linux-software-renderer'
+    })
+  })
+
+  it('reports webgl2-unavailable on Wayland instead of a blanket wayland block', () => {
+    stubNavigator('Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64)')
+    stubDisplayServer('wayland')
+    stubNoDocument()
+
+    expect(getTerminalWebglAutoDecision()).toMatchObject({
+      allowWebgl: false,
+      reason: 'linux-webgl2-unavailable'
+    })
+  })
+
+  it('keeps Wayland auto panes on CPU when renderer identity is hidden', () => {
+    stubNavigator('Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64)')
+    stubDisplayServer('wayland')
+    stubWebglRendererInfo({ hasDebugInfo: false })
+
+    expect(getTerminalWebglAutoDecision()).toMatchObject({
+      allowWebgl: false,
+      reason: 'linux-renderer-unavailable'
+    })
+  })
+
+  it('keeps Linux auto panes on DOM when WebGL2 is unavailable', () => {
+    stubNavigator('Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64)')
+    stubWebglRendererInfo({ hasWebgl2: false })
+
+    expect(getTerminalWebglAutoDecision()).toMatchObject({
+      allowWebgl: false,
+      reason: 'linux-webgl2-unavailable'
+    })
+  })
+
+  it('keeps Linux auto panes on DOM when renderer identity is hidden', () => {
+    stubNavigator('Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64)')
+    stubWebglRendererInfo({ hasDebugInfo: false })
+
+    expect(getTerminalWebglAutoDecision()).toMatchObject({
+      allowWebgl: false,
+      reason: 'linux-renderer-unavailable'
+    })
+  })
+
+  it.each([
+    ['ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)))'],
+    ['llvmpipe (LLVM 17.0.6, 256 bits)'],
+    ['softpipe'],
+    ['Mesa X11 Software Rasterizer'],
+    ['SVGA3D; build: RELEASE; LLVM;']
+  ])('keeps Linux auto panes on DOM for software renderer %s', (renderer) => {
+    stubNavigator('Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64)')
+    stubWebglRendererInfo({ renderer, vendor: 'Mesa/X.org' })
+
+    expect(getTerminalWebglAutoDecision()).toMatchObject({
+      allowWebgl: false,
+      reason: 'linux-software-renderer',
+      renderer
+    })
+  })
+})

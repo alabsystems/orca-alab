@@ -1,0 +1,27 @@
+[package]
+name = "orca-crypto"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "NaCl box (X25519 + XSalsa20-Poly1305) for Orca's E2EE remote-runtime transport, wire-compatible with tweetnacl. Over vendored, stripped crypto_box."
+
+[dependencies]
+# NaCl `box`, wire-compatible with tweetnacl/libsodium. Stripped: no getrandom
+# (nonces/seeds are injected at the IO edge), no std/serde — just the alloc AEAD
+# API + the salsa (XSalsa20-Poly1305) box.
+crypto_box = { version = "0.9", default-features = false, features = ["alloc", "salsa20"] }
+# The raw-shared-key variant (nacl.box.before + secretbox) so the TS boundary can
+# keep passing an opaque 32-byte shared key. These are the same primitives
+# crypto_box composes internally, used directly to expose the beforenm key.
+crypto_secretbox = { version = "0.1", default-features = false, features = ["alloc", "salsa20"] }
+curve25519-dalek = { version = "4", default-features = false }
+salsa20 = { version = "0.10", default-features = false }
+# Defense-in-depth: wipe our exported copies of long-lived/derived secrets
+# (KeyPair.secret_key, the beforenm shared key) on drop. `derive` isn't vendored,
+# so Zeroize/Drop are impl'd by hand rather than #[derive(ZeroizeOnDrop)].
+zeroize = { version = "1", default-features = false, features = ["alloc"] }
+
+[lints.rust]
+unsafe_code = "forbid"

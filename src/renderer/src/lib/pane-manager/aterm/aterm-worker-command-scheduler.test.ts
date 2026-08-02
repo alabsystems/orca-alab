@@ -1,0 +1,175 @@
+import { describe, expect, it } from 'vitest'
+
+import {
+  createAtermWorkerCommandScheduler,
+  splitProcessData,
+  type PaneRuntimeCommand
+} from './aterm-worker-command-scheduler'
+
+// A controllable scheduler harness: `execute` records the order commands actually run,
+// and `scheduleDrain` captures the resume so the test drives the yielding drain loop by
+// hand (deterministic — no real macrotasks/timers). `now` is a manual clock so the
+// slice budget is exercised precisely.
+function harness(opts?: {
+  chunkChars?: number
+  sliceMs?: number
+  sliceStep?: number
+  focusBurst?: number
+}) {
+  const executed: PaneRuntimeCommand[] = []
+  let pendingResume: (() => void) | null = null
+  let clock = 0
+  const sliceStep = opts?.sliceStep ?? 0
+  const scheduler = createAtermWorkerCommandScheduler({
+    execute: (c) => {
+      executed.push(c)
+      clock += sliceStep // advance the clock per unit so a slice can expire mid-drain
+    },
+    scheduleDrain: (resume) => {
+      pendingResume = resume
+    },
+    now: () => clock,
+    chunkChars: opts?.chunkChars,
+    sliceMs: opts?.sliceMs,
+    focusBurst: opts?.focusBurst
+  })
+  // Run one drain slice (mirrors the MessageChannel macrotask firing).
+  const runDrain = (): boolean => {
+    const resume = pendingResume
+    pendingResume = null
+    if (!resume) {
+      return false
+    }
+    resume()
+    return true
+  }
+  const drainToIdle = (): void => {
+    let guard = 0
+    while (runDrain()) {
+      if (++guard > 10_000) {
+        throw new Error('drain did not converge')
+      }
+    }
+  }
+  return { scheduler, executed, runDrain, drainToIdle, setClock: (t: number) => (clock = t) }
+}
+
+const proc = (paneId: number, data: string): PaneRuntimeCommand => ({
+  type: 'process',
+  paneId,
+  data
+})
+const draw = (paneId: number): PaneRuntimeCommand => ({ type: 'draw', paneId })
+
+describe('aterm worker command scheduler (QoS)', () => {
+  it('runs focused / non-process commands synchronously on arrival (fast path)', () => {
+    const h = harness()
+    h.scheduler.noteFocus(1, true)
+    h.scheduler.submit(proc(1, 'echo')) // focused process → interactive, sync
+    h.scheduler.submit(draw(2)) // background draw (non-process) → cheap, sync
+    expect(h.executed.map((c) => c.paneId)).toEqual([1, 2])
+    expect(h.scheduler.pendingCount()).toBe(0)
+  })
+
+  it('defers a BACKGROUND pane bulk process and services a focused keystroke first', () => {
+    const h = harness({ chunkChars: 4 })
+    h.scheduler.noteFocus(1, true)
+    // Background pane 2 floods (deferred, chunked into 4-char units).
+    h.scheduler.submit(proc(2, 'AAAABBBBCCCC'))
+    expect(h.executed).toHaveLength(0) // nothing ran synchronously — it deferred
+    expect(h.scheduler.pendingCount()).toBe(3)
+    // A focused keystroke arrives BEFORE the drain runs → fast-pathed immediately.
+    h.scheduler.submit(proc(1, 'x'))
+    expect(h.executed.map((c) => c.paneId)).toEqual([1]) // focused echo beat the flood
+    // Now drain the background flood.
+    h.drainToIdle()
+    expect(h.executed.map((c) => c.paneId)).toEqual([1, 2, 2, 2])
+    expect(h.executed.slice(1).map((c) => (c as { data: string }).data)).toEqual([
+      'AAAA',
+      'BBBB',
+      'CCCC'
+    ])
+  })
+
+  it('preserves per-pane FIFO: once a pane has a backlog, its later commands queue behind it', () => {
+    const h = harness({ chunkChars: 4 })
+    // No focus: pane 5 floods → deferred; a later draw for pane 5 must NOT jump ahead.
+    h.scheduler.submit(proc(5, 'AAAABBBB'))
+    h.scheduler.submit(draw(5)) // has backlog → queues behind the two process chunks
+    h.drainToIdle()
+    expect(h.executed.map((c) => c.type)).toEqual(['process', 'process', 'draw'])
+  })
+
+  it('time-slices the drain, yielding so a keystroke posted mid-flood is not starved', () => {
+    // sliceStep=5, sliceMs=8 → 2 units per slice, then it yields.
+    const h = harness({ chunkChars: 1, sliceMs: 8, sliceStep: 5 })
+    h.scheduler.submit(proc(9, 'ABCDEF')) // 6 one-char chunks, background
+    expect(h.scheduler.pendingCount()).toBe(6)
+    h.runDrain() // one slice: ~2 units before the 8ms budget is spent
+    const afterFirstSlice = h.executed.length
+    expect(afterFirstSlice).toBeGreaterThan(0)
+    expect(afterFirstSlice).toBeLessThan(6) // it yielded — did NOT run the whole flood
+    h.drainToIdle()
+    expect(h.executed).toHaveLength(6)
+  })
+
+  it('round-robins background panes so one flood cannot starve its siblings', () => {
+    const h = harness({ chunkChars: 1 })
+    h.scheduler.submit(proc(1, 'aaaa')) // 4 chunks
+    h.scheduler.submit(proc(2, 'b')) // 1 chunk — must not wait for all of pane 1
+    h.drainToIdle()
+    const firstTwoPanes = h.executed.slice(0, 2).map((c) => c.paneId)
+    expect(firstTwoPanes).toContain(2) // pane 2 serviced early, not after all of pane 1
+  })
+
+  it('a re-fed focused backlog cannot starve background panes: yields one bg unit per focusBurst', () => {
+    // A pane accrues a backlog WHILE background, then gains focus (the everyday
+    // "start a flood in a pane, then switch to watch it" flow) and keeps being re-fed —
+    // a focused pane with a backlog defers even its own `process`, so its queue never
+    // drains to empty on its own. Before the QoS fix pickPane returned the focused pane
+    // for every drain unit, so background sibling 2 ran only AFTER all 10 focused units.
+    const h = harness({ chunkChars: 1, focusBurst: 3 })
+    h.scheduler.submit(proc(1, 'aaaaaaaaaa')) // pane 1 floods while background: 10 chunks
+    h.scheduler.submit(proc(2, 'bbb')) // background sibling 2: 3 chunks
+    h.scheduler.noteFocus(1, true) // now pane 1 is focused WITH a backlog
+    h.drainToIdle()
+    const panes = h.executed.map((c) => c.paneId)
+    // Sibling 2 gets its guaranteed turn within the first focusBurst+1 units — not starved
+    // behind the whole focused flood.
+    expect(panes.slice(0, 4)).toEqual([1, 1, 1, 2])
+    // And its 3 units land interleaved (every 4th), finishing well before pane 1's flood.
+    const lastBg = panes.lastIndexOf(2)
+    const lastFocused = panes.lastIndexOf(1)
+    expect(lastBg).toBeLessThan(lastFocused)
+    expect(panes.filter((p) => p === 2)).toHaveLength(3)
+  })
+
+  it('forget() drops a pane deferred work so nothing runs against a freed engine', () => {
+    const h = harness({ chunkChars: 1 })
+    h.scheduler.submit(proc(7, 'abcd'))
+    expect(h.scheduler.pendingCount()).toBe(4)
+    h.scheduler.forget(7)
+    expect(h.scheduler.pendingCount()).toBe(0)
+    h.drainToIdle()
+    expect(h.executed).toHaveLength(0)
+  })
+
+  it('splitProcessData never severs a surrogate pair', () => {
+    // Three astral glyphs (6 UTF-16 code units) split at 3: a naive slice would cut the
+    // second glyph in half. The splitter glues the trailing high surrogate to its low
+    // half, so the first chunk stretches to 4 units.
+    const emoji = '\u{1F600}\u{1F601}\u{1F602}'
+    const parts = splitProcessData(emoji, 3)
+    expect(parts).toEqual(['\u{1F600}\u{1F601}', '\u{1F602}'])
+    // Mixed BMP/astral: every naive 2-unit boundary lands mid-pair; glue shifts each.
+    const mixed = 'a\u{1F600}b\u{1F601}'
+    const mixedParts = splitProcessData(mixed, 2)
+    expect(mixedParts).toEqual(['a\u{1F600}', 'b\u{1F601}'])
+    for (const part of [...parts, ...mixedParts]) {
+      expect(part).not.toMatch(/[\uD800-\uDBFF]$/) // never ends on a lone high half
+      expect(part).not.toMatch(/^[\uDC00-\uDFFF]/) // never starts on a lone low half
+    }
+    expect(parts.join('')).toBe(emoji)
+    expect(mixedParts.join('')).toBe(mixed)
+  })
+})

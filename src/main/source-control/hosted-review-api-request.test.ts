@@ -1,0 +1,178 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { HostedReviewApiRequestError, requestHostedReviewJson } from './hosted-review-api-request'
+
+const OLD_FETCH = globalThis.fetch
+const ONE_MB = 1024 * 1024
+
+function streamingBody(chunk: Uint8Array, chunkCount: number): ReadableStream<Uint8Array> {
+  let emitted = 0
+  return new ReadableStream({
+    pull(controller) {
+      if (emitted >= chunkCount) {
+        controller.close()
+        return
+      }
+      emitted += 1
+      controller.enqueue(chunk)
+    }
+  })
+}
+
+describe('requestHostedReviewJson', () => {
+  afterEach(() => {
+    globalThis.fetch = OLD_FETCH
+  })
+
+  it('returns parsed JSON on a successful response', async () => {
+    globalThis.fetch = vi.fn(async () => Response.json({ number: 7 })) as never
+    await expect(
+      requestHostedReviewJson<{ number: number }>(
+        new URL('https://api.example.com/v1/pulls'),
+        { method: 'GET' },
+        5000
+      )
+    ).resolves.toEqual({ number: 7 })
+  })
+
+  it('parses a BOM-prefixed JSON body (Codex second lens)', async () => {
+    // Reading bounded bytes replaced response.json(), which strips a leading BOM during
+    // UTF-8 decode; Buffer.toString('utf-8') keeps U+FEFF and JSON.parse then rejects a
+    // valid body. Self-hosted forges (Azure DevOps Server especially) do emit one.
+    const bom = new Uint8Array([0xef, 0xbb, 0xbf])
+    const payload = new TextEncoder().encode(JSON.stringify({ number: 7 }))
+    const body = new Uint8Array(bom.length + payload.length)
+    body.set(bom)
+    body.set(payload, bom.length)
+    globalThis.fetch = vi.fn(async () => new Response(body)) as never
+
+    await expect(
+      requestHostedReviewJson<{ number: number }>(
+        new URL('https://forge.example.com/api/pulls'),
+        { method: 'GET' },
+        5000
+      )
+    ).resolves.toEqual({ number: 7 })
+  })
+
+  it('strips the BOM from an error body used as the thrown message', async () => {
+    const bom = new Uint8Array([0xef, 0xbb, 0xbf])
+    const payload = new TextEncoder().encode('forbidden')
+    const body = new Uint8Array(bom.length + payload.length)
+    body.set(bom)
+    body.set(payload, bom.length)
+    globalThis.fetch = vi.fn(async () => new Response(body, { status: 403 })) as never
+
+    await expect(
+      requestHostedReviewJson(
+        new URL('https://forge.example.com/api/pulls'),
+        { method: 'GET' },
+        5000
+      )
+    ).rejects.toMatchObject({ message: 'forbidden' })
+  })
+
+  it('refuses to follow a redirect to a different host and never re-issues the request there', async () => {
+    const contactedHosts: string[] = []
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      contactedHosts.push(new URL(String(input)).host)
+      return new Response(null, {
+        status: 302,
+        headers: { location: 'http://169.254.169.254/latest/meta-data' }
+      })
+    })
+    globalThis.fetch = fetchMock as never
+
+    await expect(
+      requestHostedReviewJson(
+        new URL('https://forge.example.com/api/pulls'),
+        { method: 'POST', headers: { Authorization: 'token secret' }, body: '{}' },
+        5000
+      )
+    ).rejects.toBeInstanceOf(HostedReviewApiRequestError)
+
+    // Only the original host was ever contacted; the redirect target was not followed.
+    expect(contactedHosts).toEqual(['forge.example.com'])
+  })
+
+  it('follows a same-origin redirect', async () => {
+    let call = 0
+    const fetchMock = vi.fn(async () => {
+      call += 1
+      if (call === 1) {
+        return new Response(null, {
+          status: 307,
+          headers: { location: 'https://forge.example.com/api/v2/pulls' }
+        })
+      }
+      return Response.json({ number: 99 })
+    })
+    globalThis.fetch = fetchMock as never
+
+    await expect(
+      requestHostedReviewJson<{ number: number }>(
+        new URL('https://forge.example.com/api/v1/pulls'),
+        { method: 'GET' },
+        5000
+      )
+    ).resolves.toEqual({ number: 99 })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('rewrites POST to GET and drops the body on a 303 same-origin redirect (no replay)', async () => {
+    const calls: { method?: string; hadBody: boolean }[] = []
+    const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ method: init?.method, hadBody: init?.body != null })
+      if (calls.length === 1) {
+        return new Response(null, {
+          status: 303,
+          headers: { location: 'https://forge.example.com/api/v1/pulls/9' }
+        })
+      }
+      return Response.json({ number: 9 })
+    })
+    globalThis.fetch = fetchMock as never
+
+    await expect(
+      requestHostedReviewJson<{ number: number }>(
+        new URL('https://forge.example.com/api/v1/pulls'),
+        { method: 'POST', body: '{"title":"x"}' },
+        5000
+      )
+    ).resolves.toEqual({ number: 9 })
+    // The create POST must not be replayed as a mutation against the redirect target.
+    expect(calls[0]?.method).toBe('POST')
+    expect(calls[1]?.method).toBe('GET')
+    expect(calls[1]?.hadBody).toBe(false)
+  })
+
+  it('rejects a response whose Content-Length exceeds the cap without buffering it', async () => {
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response('{}', {
+          headers: { 'content-length': String(64 * ONE_MB) }
+        })
+    ) as never
+
+    await expect(
+      requestHostedReviewJson(
+        new URL('https://forge.example.com/api/pulls'),
+        { method: 'GET' },
+        5000
+      )
+    ).rejects.toMatchObject({ message: 'Response body exceeds maximum allowed size' })
+  })
+
+  it('rejects a chunked response that streams past the byte cap', async () => {
+    // 32 x 1 MiB (reused buffer keeps the test light) overruns the 16 MiB cap.
+    const chunk = new Uint8Array(ONE_MB)
+    globalThis.fetch = vi.fn(async () => new Response(streamingBody(chunk, 32))) as never
+
+    await expect(
+      requestHostedReviewJson(
+        new URL('https://forge.example.com/api/pulls'),
+        { method: 'GET' },
+        5000
+      )
+    ).rejects.toMatchObject({ message: 'Response body exceeds maximum allowed size' })
+  })
+})

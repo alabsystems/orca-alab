@@ -1,0 +1,1215 @@
+/* eslint-disable max-lines -- Why: the Agents pane keeps catalog rows, default
+   selection, per-agent controls, and runtime location together so settings
+   reconciliation stays visible in one file. */
+import { useEffect, useId, useMemo, useState } from 'react'
+import {
+  AlertTriangle,
+  Check,
+  ChevronDown,
+  ExternalLink,
+  Info,
+  RefreshCw,
+  Terminal,
+  Wrench
+} from 'lucide-react'
+import type { GlobalSettings, TuiAgent } from '../../../../shared/types'
+import { getAgentCatalog, AgentIcon } from '@/lib/agent-catalog'
+import { useDetectedAgents, type AgentDetectionTarget } from '@/hooks/useDetectedAgents'
+import { useAppStore } from '@/store'
+import { Button } from '../ui/button'
+import { Input } from '../ui/input'
+import { cn } from '@/lib/utils'
+import { AgentAwakeSetting } from './AgentAwakeSetting'
+import { AgentCacheTimerSection } from './AgentCacheTimerSection'
+import { AgentPersonalizationSection } from './AgentPersonalizationSection'
+import { AgentRuntimeSetting } from './AgentRuntimeSetting'
+import {
+  AgentSessionSourceHomeInput,
+  buildCodexSessionSourceHomeControl,
+  type AgentSessionSourceHomeControl
+} from './codex-session-source-home-control'
+import {
+  getAgentGeneratedTabTitlesDescription,
+  getAgentGeneratedTabTitlesTitle
+} from './agent-generated-tab-title-copy'
+import { getAgentStatusHooksDescription, getAgentStatusHooksTitle } from './agent-status-hooks-copy'
+import {
+  SettingsBadge,
+  SettingsSegmentedControl,
+  SettingsSubsectionHeader,
+  SettingsSwitchRow
+} from './SettingsFormControls'
+import {
+  isTuiAgentEnabled,
+  normalizeDisabledTuiAgents
+} from '../../../../shared/tui-agent-selection'
+import {
+  resolveTuiAgentLaunchArgs,
+  resolveTuiAgentLaunchEnv
+} from '../../../../shared/tui-agent-launch-defaults'
+import {
+  applyAgentPermissionMode,
+  getPresetAgentArgs,
+  getPresetAgentEnv,
+  normalizeAgentPermissionPreset,
+  resolveAgentPermissionModeSummary,
+  type AgentPermissionMode
+} from '../../../../shared/tui-agent-permissions'
+import { getSettingOwnershipSummary } from './setting-ownership'
+import { translate } from '@/i18n/i18n'
+import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip'
+import { parseAgentDefaultEnvDraft, stringifyAgentDefaultEnvDraft } from './agent-default-env-draft'
+import { CustomAgentsSection } from './CustomAgentsSection'
+
+export { getAgentsPaneSearchEntries } from './agents-search'
+
+type AgentsPaneProps = {
+  settings: GlobalSettings
+  updateSettings: (updates: Partial<GlobalSettings>) => void | Promise<void>
+  wslSupportedPlatform?: boolean
+  wslAvailable?: boolean
+  wslDistros?: string[]
+  wslCapabilitiesLoading?: boolean
+}
+
+type AgentAvailabilityUpdateQueueOptions = {
+  getSettings: () => GlobalSettings | null | undefined
+  fallbackSettings: GlobalSettings
+  updateSettings: AgentsPaneProps['updateSettings']
+  agentId: TuiAgent
+  enabled: boolean
+}
+
+type AgentRowProps = {
+  agentId: TuiAgent
+  label: string
+  homepageUrl: string
+  defaultCmd: string
+  defaultArgs: string
+  defaultEnv: Record<string, string>
+  isDetected: boolean
+  isEnabled: boolean
+  isDefault: boolean
+  cmdOverride: string | undefined
+  argsOverride: string
+  envOverride: Record<string, string>
+  onSetDefault: () => void
+  onSetEnabled: (enabled: boolean) => void
+  onSaveOverride: (value: string) => void
+  onSaveArgs: (value: string) => void
+  onSaveEnv: (value: Record<string, string>) => void
+  /** Codex-only: current runtime scope label + persisted history-source override. */
+  sessionSourceHome?: AgentSessionSourceHomeControl
+}
+
+type AgentCommandOverrideInputProps = {
+  defaultCmd: string
+  cmdOverride: string | undefined
+  onSaveOverride: (value: string) => void
+}
+
+type AgentDefaultArgsInputProps = {
+  defaultArgs: string
+  argsOverride: string
+  onSaveArgs: (value: string) => void
+}
+
+type AgentDefaultEnvInputProps = {
+  defaultEnv: Record<string, string>
+  envOverride: Record<string, string>
+  onSaveEnv: (value: Record<string, string>) => void
+}
+
+type AgentAvailability = 'enabled' | 'disabled'
+
+type AgentAvailabilityControlProps = {
+  label: string
+  isEnabled: boolean
+  onSetEnabled: (enabled: boolean) => void
+}
+
+type AgentPermissionsSettingProps = {
+  mode: AgentPermissionMode
+  /** True when per-agent args/env diverge from every preset — the control then shows intent, not fact. */
+  customized?: boolean
+  onChange: (mode: Exclude<AgentPermissionMode, 'mixed'>) => void
+}
+
+export function buildAgentAvailabilitySettingsUpdate(
+  settings: Pick<GlobalSettings, 'defaultTuiAgent' | 'disabledTuiAgents'>,
+  id: TuiAgent,
+  enabled: boolean
+): Pick<GlobalSettings, 'disabledTuiAgents'> & Partial<Pick<GlobalSettings, 'defaultTuiAgent'>> {
+  const latestDisabled = normalizeDisabledTuiAgents(settings.disabledTuiAgents)
+  const nextDisabled = enabled
+    ? latestDisabled.filter((agent) => agent !== id)
+    : latestDisabled.includes(id)
+      ? latestDisabled
+      : [...latestDisabled, id]
+
+  return {
+    disabledTuiAgents: nextDisabled,
+    ...(settings.defaultTuiAgent === id && !enabled ? { defaultTuiAgent: null } : {})
+  }
+}
+
+export function createAgentAvailabilityUpdateQueue(): (
+  options: AgentAvailabilityUpdateQueueOptions
+) => Promise<void> {
+  let pendingUpdate: Promise<unknown> = Promise.resolve()
+
+  return ({ getSettings, fallbackSettings, updateSettings, agentId, enabled }) => {
+    // Why: serialize full-array replacements so each write sees the store after
+    // the previous IPC has reconciled, while preserving the user's requested state.
+    pendingUpdate = pendingUpdate
+      .catch(() => {})
+      .then(() =>
+        updateSettings(
+          buildAgentAvailabilitySettingsUpdate(getSettings() ?? fallbackSettings, agentId, enabled)
+        )
+      )
+    return pendingUpdate.then(() => undefined)
+  }
+}
+
+const enqueueAgentAvailabilityUpdate = createAgentAvailabilityUpdateQueue()
+
+export function shouldResetUnavailableWslAgentRuntime(args: {
+  localAgentRuntime: GlobalSettings['localAgentRuntime']
+  wslSupportedPlatform: boolean
+  wslAvailable: boolean
+  wslCapabilitiesLoading: boolean
+}): boolean {
+  if (args.localAgentRuntime !== 'wsl') {
+    return false
+  }
+  const wslUnavailable =
+    args.wslSupportedPlatform && !args.wslAvailable && !args.wslCapabilitiesLoading
+  return !args.wslSupportedPlatform || wslUnavailable
+}
+
+export function AgentAvailabilityControl({
+  label,
+  isEnabled,
+  onSetEnabled
+}: AgentAvailabilityControlProps): React.JSX.Element {
+  const value: AgentAvailability = isEnabled ? 'enabled' : 'disabled'
+
+  return (
+    <SettingsSegmentedControl<AgentAvailability>
+      value={value}
+      onChange={(next) => {
+        if (next !== value) {
+          onSetEnabled(next === 'enabled')
+        }
+      }}
+      ariaLabel={translate(
+        'auto.components.settings.AgentsPane.1c9a9679ec',
+        '{{value0}} availability',
+        { value0: label }
+      )}
+      size="sm"
+      options={[
+        {
+          value: 'enabled',
+          label: translate('auto.components.settings.AgentsPane.d4d2a45d63', 'Enabled')
+        },
+        {
+          value: 'disabled',
+          label: translate('auto.components.settings.AgentsPane.8dc0192e48', 'Disabled')
+        }
+      ]}
+    />
+  )
+}
+
+export function AgentPermissionsSetting({
+  mode,
+  customized = false,
+  onChange
+}: AgentPermissionsSettingProps): React.JSX.Element {
+  // Why mixed collapses to yolo: hand-customized args predate presets and were historically yolo-ish.
+  const visibleMode: Exclude<AgentPermissionMode, 'mixed'> = mode === 'mixed' ? 'yolo' : mode
+  return (
+    <section className="space-y-3">
+      <SettingsSubsectionHeader
+        title={
+          <span className="flex items-center gap-2">
+            {translate('auto.components.settings.AgentsPane.agentPermissions', 'Agent Permissions')}
+            {customized && (
+              <SettingsBadge>
+                {translate(
+                  'auto.components.settings.AgentsPane.agentPermissionsCustomized',
+                  'Customized'
+                )}
+              </SettingsBadge>
+            )}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  aria-label={translate(
+                    'auto.components.settings.AgentsPane.agentPermissionsInfo',
+                    'Agent permissions info'
+                  )}
+                  className="grid size-5 place-items-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                >
+                  <Info className="size-3.5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="top" sideOffset={6}>
+                {translate(
+                  'auto.components.settings.AgentsPane.agentPermissionsTooltip',
+                  "Doesn't apply to agents where you've overridden launch arguments."
+                )}
+              </TooltipContent>
+            </Tooltip>
+          </span>
+        }
+        description={translate(
+          'auto.components.settings.AgentsPane.agentPermissionsDescription',
+          'Safe runs supported agents inside an OS sandbox with prompts off; agents without a sandbox keep manual checks. Yolo skips prompts without a sandbox. Manual keeps each agent’s own permission prompts.'
+        )}
+        action={
+          <SettingsSegmentedControl<AgentPermissionMode>
+            value={visibleMode}
+            onChange={(nextMode) => {
+              if (nextMode !== 'mixed') {
+                onChange(nextMode)
+              }
+            }}
+            ariaLabel={translate(
+              'auto.components.settings.AgentsPane.agentPermissions',
+              'Agent Permissions'
+            )}
+            size="sm"
+            options={[
+              {
+                value: 'safe',
+                label: translate('auto.components.settings.AgentsPane.agentPermissionsSafe', 'Safe')
+              },
+              {
+                value: 'yolo',
+                label: translate('auto.components.settings.AgentsPane.agentPermissionsYolo', 'Yolo')
+              },
+              {
+                value: 'manual',
+                label: translate(
+                  'auto.components.settings.AgentsPane.agentPermissionsManual',
+                  'Manual'
+                )
+              }
+            ]}
+          />
+        }
+      />
+    </section>
+  )
+}
+
+function AgentCommandOverrideInput({
+  defaultCmd,
+  cmdOverride,
+  onSaveOverride
+}: AgentCommandOverrideInputProps): React.JSX.Element {
+  const draftSeed = cmdOverride ?? defaultCmd
+  const [cmdDraft, setCmdDraft] = useState(draftSeed)
+
+  const commitCmd = (): void => {
+    const trimmed = cmdDraft.trim()
+    if (!trimmed || trimmed === defaultCmd) {
+      onSaveOverride('')
+      setCmdDraft(defaultCmd)
+    } else {
+      onSaveOverride(trimmed)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-xs text-muted-foreground">
+        {translate('auto.components.settings.AgentsPane.2e45ca29b6', 'Command')}
+      </span>
+      <div className="flex items-center gap-2">
+        <Input
+          value={cmdDraft}
+          onChange={(e) => setCmdDraft(e.target.value)}
+          onBlur={commitCmd}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              commitCmd()
+              e.currentTarget.blur()
+            }
+            if (e.key === 'Escape') {
+              setCmdDraft(draftSeed)
+              e.currentTarget.blur()
+            }
+          }}
+          placeholder={defaultCmd}
+          spellCheck={false}
+          className="h-7 flex-1 font-mono text-xs"
+        />
+        {cmdOverride && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            onClick={() => {
+              onSaveOverride('')
+              setCmdDraft(defaultCmd)
+            }}
+            className="h-7 shrink-0 text-xs text-muted-foreground hover:text-foreground"
+          >
+            {translate('auto.components.settings.AgentsPane.5200dac9da', 'Reset')}
+          </Button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function AgentDefaultArgsInput({
+  defaultArgs,
+  argsOverride,
+  onSaveArgs
+}: AgentDefaultArgsInputProps): React.JSX.Element {
+  const draftSeed = argsOverride
+  const [argsDraft, setArgsDraft] = useState(draftSeed)
+
+  const commitArgs = (): void => {
+    onSaveArgs(argsDraft.trim())
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-xs text-muted-foreground">
+        {translate('auto.components.settings.AgentsPane.cfb3f35775', 'Arguments')}
+      </span>
+      <div className="flex items-center gap-2">
+        <Input
+          value={argsDraft}
+          onChange={(e) => setArgsDraft(e.target.value)}
+          onBlur={commitArgs}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              commitArgs()
+              e.currentTarget.blur()
+            }
+            if (e.key === 'Escape') {
+              setArgsDraft(draftSeed)
+              e.currentTarget.blur()
+            }
+          }}
+          placeholder={
+            defaultArgs ||
+            translate('auto.components.settings.AgentsPane.6f99bf5dd0', 'No default arguments')
+          }
+          spellCheck={false}
+          className="h-7 flex-1 font-mono text-xs"
+        />
+        {argsOverride !== defaultArgs && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            onClick={() => {
+              onSaveArgs(defaultArgs)
+              setArgsDraft(defaultArgs)
+            }}
+            className="h-7 shrink-0 text-xs text-muted-foreground hover:text-foreground"
+          >
+            {translate('auto.components.settings.AgentsPane.5200dac9da', 'Reset')}
+          </Button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function AgentDefaultEnvInput({
+  defaultEnv,
+  envOverride,
+  onSaveEnv
+}: AgentDefaultEnvInputProps): React.JSX.Element {
+  const defaultEnvText = stringifyAgentDefaultEnvDraft(defaultEnv)
+  const draftSeed = stringifyAgentDefaultEnvDraft(envOverride)
+  const [envDraft, setEnvDraft] = useState(draftSeed)
+  const [envDraftTooLarge, setEnvDraftTooLarge] = useState(false)
+  const envDraftErrorId = useId()
+
+  const commitEnv = (): void => {
+    const parsedDraft = parseAgentDefaultEnvDraft(envDraft)
+    setEnvDraftTooLarge(parsedDraft.tooLarge)
+    if (parsedDraft.tooLarge) {
+      return
+    }
+    onSaveEnv(parsedDraft.env)
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-xs text-muted-foreground">
+        {translate('auto.components.settings.AgentsPane.8fbe1f37c1', 'Environment')}
+      </span>
+      <div className="flex items-center gap-2">
+        <Input
+          value={envDraft}
+          onChange={(e) => {
+            setEnvDraft(e.target.value)
+            if (envDraftTooLarge) {
+              setEnvDraftTooLarge(false)
+            }
+          }}
+          onBlur={commitEnv}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              commitEnv()
+              e.currentTarget.blur()
+            }
+            if (e.key === 'Escape') {
+              setEnvDraft(draftSeed)
+              setEnvDraftTooLarge(false)
+              e.currentTarget.blur()
+            }
+          }}
+          placeholder={
+            defaultEnvText ||
+            translate('auto.components.settings.AgentsPane.2d133152fa', 'No default environment')
+          }
+          spellCheck={false}
+          aria-invalid={envDraftTooLarge || undefined}
+          aria-describedby={envDraftTooLarge ? envDraftErrorId : undefined}
+          className={cn(
+            'h-7 flex-1 font-mono text-xs',
+            envDraftTooLarge && 'border-destructive/50 bg-destructive/5'
+          )}
+        />
+        {draftSeed !== defaultEnvText && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            onClick={() => {
+              onSaveEnv(defaultEnv)
+              setEnvDraft(defaultEnvText)
+              setEnvDraftTooLarge(false)
+            }}
+            className="h-7 shrink-0 text-xs text-muted-foreground hover:text-foreground"
+          >
+            {translate('auto.components.settings.AgentsPane.5200dac9da', 'Reset')}
+          </Button>
+        )}
+      </div>
+      {envDraftTooLarge && (
+        <p id={envDraftErrorId} className="mt-1 text-[11px] text-destructive">
+          {translate(
+            'auto.components.settings.AgentsPane.3f1bdf3cb4',
+            'Environment text is too large to parse safely.'
+          )}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function AgentRow({
+  agentId,
+  label,
+  homepageUrl,
+  defaultCmd,
+  defaultArgs,
+  defaultEnv,
+  isDetected,
+  isEnabled,
+  isDefault,
+  cmdOverride,
+  argsOverride,
+  envOverride,
+  onSetDefault,
+  onSetEnabled,
+  onSaveOverride,
+  onSaveArgs,
+  onSaveEnv,
+  sessionSourceHome
+}: AgentRowProps): React.JSX.Element {
+  const envSummary = stringifyAgentDefaultEnvDraft(envOverride)
+  const defaultEnvSummary = stringifyAgentDefaultEnvDraft(defaultEnv)
+  const [cmdOpen, setCmdOpen] = useState(
+    Boolean(cmdOverride) || argsOverride !== defaultArgs || envSummary !== defaultEnvSummary
+  )
+
+  return (
+    <div className={cn('py-3', !isDetected && 'opacity-70')}>
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border/50 bg-background/50">
+          <AgentIcon agent={agentId} size={16} />
+        </div>
+
+        <div className="min-w-0 flex-1 sm:min-w-[12rem]">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium leading-none">{label}</span>
+            {!isEnabled && (
+              <SettingsBadge tone="muted">
+                {translate('auto.components.settings.AgentsPane.8dc0192e48', 'Disabled')}
+              </SettingsBadge>
+            )}
+          </div>
+          <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+            {cmdOverride ? (
+              <span>
+                <span className="text-muted-foreground/60 line-through">{defaultCmd}</span>
+                <span className="ml-1.5 text-foreground/80">{cmdOverride}</span>
+              </span>
+            ) : (
+              defaultCmd
+            )}
+            {argsOverride && <span className="ml-1.5 text-foreground/70">{argsOverride}</span>}
+            {envSummary && <span className="ml-1.5 text-foreground/60">{envSummary}</span>}
+          </div>
+        </div>
+
+        <div className="ml-auto grid shrink-0 grid-cols-[max-content_6.5rem_1.75rem_1.75rem] items-center gap-1.5">
+          <AgentAvailabilityControl
+            label={label}
+            isEnabled={isEnabled}
+            onSetEnabled={onSetEnabled}
+          />
+
+          <div className="flex justify-start">
+            {isDetected && isEnabled && (
+              <Button
+                type="button"
+                variant={isDefault ? 'secondary' : 'ghost'}
+                size="xs"
+                onClick={onSetDefault}
+                title={
+                  isDefault
+                    ? translate('auto.components.settings.AgentsPane.d7625cf8b2', 'Default agent')
+                    : translate('auto.components.settings.AgentsPane.5f986a9b92', 'Set as default')
+                }
+                className="h-7 w-full justify-center gap-1 text-xs"
+              >
+                {isDefault && <Check className="size-3" />}
+                {isDefault
+                  ? translate('auto.components.settings.AgentsPane.24e032fa34', 'Default')
+                  : translate('auto.components.settings.AgentsPane.959b67385b', 'Set default')}
+              </Button>
+            )}
+          </div>
+
+          <a
+            href={homepageUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={
+              isDetected
+                ? translate('auto.components.settings.AgentsPane.fe4d630c94', 'Docs')
+                : translate('auto.components.settings.AgentsPane.f95b5c79b8', 'Install')
+            }
+            className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+          >
+            <ExternalLink className="size-3.5" />
+          </a>
+
+          <div className="flex size-7 items-center justify-center">
+            {isDetected && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => setCmdOpen((prev) => !prev)}
+                aria-label={
+                  cmdOpen
+                    ? translate(
+                        'auto.components.settings.AgentsPane.cea7d97be1',
+                        'Collapse command override'
+                      )
+                    : translate(
+                        'auto.components.settings.AgentsPane.dc4a2ffdc0',
+                        'Expand command override'
+                      )
+                }
+                className="size-7 text-muted-foreground hover:text-foreground"
+              >
+                <ChevronDown
+                  className={cn('size-3.5 transition-transform', cmdOpen && 'rotate-180')}
+                />
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {isDetected && cmdOpen && (
+        <div className="mt-3 pl-10">
+          {/* Why: key by the persisted seed so settings changes reset the draft during reconciliation, not in a follow-up effect commit. */}
+          <AgentCommandOverrideInput
+            key={cmdOverride ?? defaultCmd}
+            defaultCmd={defaultCmd}
+            cmdOverride={cmdOverride}
+            onSaveOverride={onSaveOverride}
+          />
+          <div className="mt-2">
+            <AgentDefaultArgsInput
+              key={`${agentId}:${argsOverride}`}
+              defaultArgs={defaultArgs}
+              argsOverride={argsOverride}
+              onSaveArgs={onSaveArgs}
+            />
+          </div>
+          {(defaultEnvSummary || envSummary) && (
+            <div className="mt-2">
+              <AgentDefaultEnvInput
+                key={`${agentId}:${envSummary}`}
+                defaultEnv={defaultEnv}
+                envOverride={envOverride}
+                onSaveEnv={onSaveEnv}
+              />
+            </div>
+          )}
+          {sessionSourceHome && (
+            <div className="mt-2">
+              <AgentSessionSourceHomeInput
+                key={`${agentId}:${sessionSourceHome.runtimeLabel}:${sessionSourceHome.value}`}
+                runtimeLabel={sessionSourceHome.runtimeLabel}
+                value={sessionSourceHome.value}
+                onSave={sessionSourceHome.onSave}
+              />
+            </div>
+          )}
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            {translate(
+              'auto.components.settings.AgentsPane.f9f127d664',
+              'Override the binary path or name, and edit the default launch arguments or environment for this agent.'
+            )}
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+type DefaultAgentPillProps = {
+  active: boolean
+  onClick: () => void
+  children: React.ReactNode
+}
+
+function DefaultAgentPill({ active, onClick, children }: DefaultAgentPillProps): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        'inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50',
+        active
+          ? 'border-muted-foreground/40 bg-accent font-medium text-accent-foreground'
+          : 'border-border bg-background/50 text-muted-foreground hover:border-muted-foreground/35 hover:text-foreground'
+      )}
+    >
+      {children}
+    </button>
+  )
+}
+
+export function AgentsPane({
+  settings,
+  updateSettings,
+  wslSupportedPlatform,
+  wslAvailable,
+  wslDistros,
+  wslCapabilitiesLoading
+}: AgentsPaneProps): React.JSX.Element {
+  // Why (#9790): the Active Server routes agent launches and provider checks
+  // through that host, so this pane must list what THAT host can launch —
+  // detecting on the client showed a Windows machine's agents while paired to a
+  // Linux server. The enable/disable/default toggles stay client-local settings.
+  const activeServerEnvironmentId = settings.activeRuntimeEnvironmentId?.trim() || null
+  const agentDetectionTarget = useMemo<AgentDetectionTarget>(
+    () =>
+      activeServerEnvironmentId
+        ? { kind: 'runtime', environmentId: activeServerEnvironmentId }
+        : { kind: 'local' },
+    [activeServerEnvironmentId]
+  )
+  const {
+    detectedIds: detectedList,
+    detectionFailed,
+    isRefreshing,
+    refresh: refreshTargetAgents
+  } = useDetectedAgents(agentDetectionTarget)
+  // Why (#9790): the WSL/runtime control below and the empty-list retry change
+  // the client-local runtime, so they refresh local detection even while the
+  // Installed list is scoped to an active remote server.
+  const refreshLocalAgents = useAppStore((s) => s.refreshDetectedAgents)
+  const activeServerName = useAppStore((s) =>
+    activeServerEnvironmentId
+      ? (s.runtimeEnvironments.find((environment) => environment.id === activeServerEnvironmentId)
+          ?.name ?? null)
+      : null
+  )
+  useEffect(() => {
+    if (
+      !shouldResetUnavailableWslAgentRuntime({
+        localAgentRuntime: settings.localAgentRuntime,
+        wslSupportedPlatform: wslSupportedPlatform ?? false,
+        wslAvailable: wslAvailable ?? false,
+        wslCapabilitiesLoading: wslCapabilitiesLoading ?? false
+      })
+    ) {
+      return
+    }
+    // Why: a stale WSL agent-location setting can be hidden when WSL support
+    // is unavailable or still unknown, leaving Windows users with host CLIs
+    // shown as "Not installed" and no visible control to recover.
+    void Promise.resolve(
+      updateSettings({ localAgentRuntime: 'host', localAgentWslDistro: null })
+    ).then(() => {
+      void refreshLocalAgents()
+    })
+  }, [
+    refreshLocalAgents,
+    settings.localAgentRuntime,
+    updateSettings,
+    wslAvailable,
+    wslCapabilitiesLoading,
+    wslSupportedPlatform
+  ])
+  // Why: refresh re-spawns the target host's login shell to re-capture PATH
+  // (preflight:refreshAgents). This handles the "installed a new CLI, Orca
+  // doesn't see it yet" case without a restart, on the host being shown.
+  const handleRefresh = (): void => {
+    void refreshTargetAgents()
+  }
+  const detectedIds = useMemo<Set<string> | null>(
+    () => (detectedList ? new Set(detectedList) : null),
+    [detectedList]
+  )
+
+  const defaultAgent = settings.defaultTuiAgent
+  const agentOwnership = getSettingOwnershipSummary('agentLaunchDefaults')
+  const cmdOverrides = settings.agentCmdOverrides ?? {}
+  const agentDefaultArgs = settings.agentDefaultArgs ?? {}
+  const agentDefaultEnv = settings.agentDefaultEnv ?? {}
+  const storedPermissionPreset = normalizeAgentPermissionPreset(settings.agentPermissionPreset)
+  const agentPermissionSummary = resolveAgentPermissionModeSummary({
+    agentDefaultArgs,
+    agentDefaultEnv
+  })
+  // Why the summary drives display: a stale stored preset must never label a hand-edited
+  // profile "Safe" while an agent actually launches with a bypass flag. When the profile
+  // diverges (mixed), show the stored intent but flag it as customized.
+  const agentPermissionMode =
+    agentPermissionSummary !== 'mixed'
+      ? agentPermissionSummary
+      : (storedPermissionPreset ?? 'mixed')
+  const agentPermissionsCustomized = agentPermissionSummary === 'mixed'
+  // Why: the per-agent Reset buttons restore the CHOSEN preset's values, not yolo's —
+  // on a safe profile a reset must never quietly reinstall a bypass flag or env.
+  const resetPreset =
+    storedPermissionPreset ?? (agentPermissionSummary !== 'mixed' ? agentPermissionSummary : 'yolo')
+  const presetDefaultArgsFor = (agent: TuiAgent): string => getPresetAgentArgs(agent, resetPreset)
+  const presetDefaultEnvFor = (agent: TuiAgent): Record<string, string> =>
+    getPresetAgentEnv(agent, resetPreset)
+  const disabledAgents = normalizeDisabledTuiAgents(settings.disabledTuiAgents)
+  const customAgents = settings.customAgents ?? []
+
+  const setDefault = (id: TuiAgent | 'blank' | { kind: 'custom'; id: string } | null): void => {
+    updateSettings({ defaultTuiAgent: id })
+  }
+
+  const setAgentEnabled = (id: TuiAgent, enabled: boolean): void => {
+    void enqueueAgentAvailabilityUpdate({
+      getSettings: () => useAppStore.getState().settings,
+      fallbackSettings: settings,
+      updateSettings,
+      agentId: id,
+      enabled
+    })
+  }
+
+  const saveOverride = (id: TuiAgent, value: string): void => {
+    const next = { ...cmdOverrides }
+    if (value) {
+      next[id] = value
+    } else {
+      delete next[id]
+    }
+    updateSettings({ agentCmdOverrides: next })
+  }
+
+  const saveAgentArgs = (id: TuiAgent, value: string): void => {
+    updateSettings({
+      agentDefaultArgs: {
+        ...agentDefaultArgs,
+        [id]: value
+      }
+    })
+  }
+
+  const saveAgentEnv = (id: TuiAgent, value: Record<string, string>): void => {
+    updateSettings({
+      agentDefaultEnv: {
+        ...agentDefaultEnv,
+        [id]: value
+      }
+    })
+  }
+
+  const saveAgentPermissionMode = (mode: Exclude<AgentPermissionMode, 'mixed'>): void => {
+    updateSettings({
+      agentPermissionPreset: mode,
+      ...applyAgentPermissionMode({
+        mode,
+        agentDefaultArgs,
+        agentDefaultEnv
+      })
+    })
+  }
+
+  // Why: null means detection is in flight, not "all agents are installed".
+  // Showing the full catalog here makes the default-agent picker flash invalid
+  // options while switching between Windows and WSL detection contexts.
+  const detectedAgents =
+    detectedIds === null ? [] : getAgentCatalog().filter((agent) => detectedIds.has(agent.id))
+  const enabledDetectedAgents = detectedAgents.filter((agent) =>
+    isTuiAgentEnabled(agent.id, disabledAgents)
+  )
+  const undetectedAgents = getAgentCatalog().filter(
+    (a) => detectedIds !== null && !detectedIds.has(a.id)
+  )
+
+  // Why: 'blank' is an explicit no-agent preference, not an auto fallback,
+  // so the Auto pill should only light up when the default is null OR when a
+  // selected agent id is no longer detected on PATH.
+  const isAutoDefault =
+    defaultAgent === null ||
+    (typeof defaultAgent !== 'object' &&
+      defaultAgent !== 'blank' &&
+      (!detectedIds?.has(defaultAgent) || !isTuiAgentEnabled(defaultAgent, disabledAgents)))
+  const isBlankDefault = defaultAgent === 'blank'
+  const defaultCustomAgentId =
+    defaultAgent && typeof defaultAgent === 'object' && defaultAgent.kind === 'custom'
+      ? defaultAgent.id
+      : null
+
+  return (
+    <div className="space-y-8">
+      <section className="space-y-4">
+        <SettingsSubsectionHeader
+          title={translate('auto.components.settings.AgentsPane.385212c7a1', 'Default Agent')}
+          description={agentOwnership.description}
+        />
+
+        <div className="flex flex-wrap gap-2">
+          <DefaultAgentPill active={isAutoDefault} onClick={() => setDefault(null)}>
+            {isAutoDefault && <Check className="size-3.5" />}
+            {translate('auto.components.settings.AgentsPane.92033495ff', 'Auto')}
+          </DefaultAgentPill>
+
+          {/* Why: users who prefer to open a raw shell by default need a
+              first-class "no agent" choice here — without it, the Auto pill
+              is the closest option but silently launches the first detected
+              agent, which is the opposite of what they want. */}
+          <DefaultAgentPill active={isBlankDefault} onClick={() => setDefault('blank')}>
+            <Terminal className="size-3.5" />
+            {translate(
+              'auto.components.settings.AgentsPane.110b74b022',
+              'No agent (blank terminal)'
+            )}
+            {isBlankDefault && <Check className="size-3.5" />}
+          </DefaultAgentPill>
+
+          {enabledDetectedAgents.map((agent) => {
+            const isActive = defaultAgent === agent.id
+            return (
+              <DefaultAgentPill
+                key={agent.id}
+                active={isActive}
+                onClick={() => setDefault(agent.id)}
+              >
+                <AgentIcon agent={agent.id} size={14} />
+                {agent.label}
+                {isActive && <Check className="size-3.5" />}
+              </DefaultAgentPill>
+            )
+          })}
+
+          {/* Custom-agent pills. Only profiles whose baseAgent is detected and
+              enabled show up here — a profile pointed at an uninstalled or
+              hidden CLI can't actually launch, so making it the "default"
+              would just stall. */}
+          {customAgents
+            .filter(
+              (p) =>
+                (detectedIds === null || detectedIds.has(p.baseAgent)) &&
+                isTuiAgentEnabled(p.baseAgent, disabledAgents)
+            )
+            .map((profile) => {
+              const isActive = defaultCustomAgentId === profile.id
+              return (
+                <DefaultAgentPill
+                  key={`custom:${profile.id}`}
+                  active={isActive}
+                  onClick={() => setDefault({ kind: 'custom', id: profile.id })}
+                >
+                  <span className="relative inline-flex">
+                    <AgentIcon agent={profile.baseAgent} size={14} />
+                    <Wrench
+                      className="absolute -right-1 -bottom-1 size-2 rounded-sm bg-background p-[1px] text-muted-foreground"
+                      aria-hidden
+                    />
+                  </span>
+                  {profile.label}
+                  {isActive && <Check className="size-3.5" />}
+                </DefaultAgentPill>
+              )
+            })}
+        </div>
+      </section>
+
+      <CustomAgentsSection
+        customAgents={customAgents}
+        onChange={(next) => updateSettings({ customAgents: next })}
+        defaultCustomAgentId={defaultCustomAgentId}
+        onSetDefault={(id) => setDefault({ kind: 'custom', id })}
+        // Why: the env shell-prefix path uses POSIX quoting; on Windows the
+        // user needs to wrap with `cmd /c …` to apply env vars cleanly. The
+        // settings hint flags this without blocking the input.
+        isWindows={typeof navigator !== 'undefined' && navigator.userAgent.includes('Windows')}
+      />
+
+      <AgentRuntimeSetting
+        settings={settings}
+        updateSettings={updateSettings}
+        // Why (#9790): this control changes the client-local Windows/WSL runtime
+        // even while the Installed list is scoped to an active remote server.
+        refresh={refreshLocalAgents}
+        wslSupportedPlatform={wslSupportedPlatform}
+        wslAvailable={wslAvailable}
+        wslDistros={wslDistros}
+        wslCapabilitiesLoading={wslCapabilitiesLoading}
+      />
+
+      <AgentStatusHooksSetting settings={settings} updateSettings={updateSettings} />
+
+      <AgentGeneratedTabTitlesSetting settings={settings} updateSettings={updateSettings} />
+
+      <AgentAwakeSetting settings={settings} updateSettings={updateSettings} />
+
+      <AgentCacheTimerSection settings={settings} updateSettings={updateSettings} />
+
+      <AgentPermissionsSetting
+        mode={agentPermissionMode}
+        customized={agentPermissionsCustomized}
+        onChange={saveAgentPermissionMode}
+      />
+
+      <AgentPersonalizationSection
+        settings={settings}
+        updateSettings={updateSettings}
+        detectedAgents={detectedAgents}
+      />
+
+      {/* Detected agents */}
+      {detectedAgents.length > 0 && (
+        <section className="space-y-3">
+          <SettingsSubsectionHeader
+            title={
+              <span className="flex items-center gap-2">
+                {translate('auto.components.settings.AgentsPane.02e0143be5', 'Installed')}
+                <SettingsBadge tone="accent">
+                  {detectedAgents.length}{' '}
+                  {translate('auto.components.settings.AgentsPane.ed3e110e61', 'detected')}
+                </SettingsBadge>
+                {activeServerName ? (
+                  <SettingsBadge tone="muted">
+                    {translate('auto.components.settings.AgentsPane.03e1a5081a', 'on {{value0}}', {
+                      value0: activeServerName
+                    })}
+                  </SettingsBadge>
+                ) : null}
+              </span>
+            }
+            action={
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                onClick={handleRefresh}
+                disabled={isRefreshing}
+                title={
+                  activeServerEnvironmentId
+                    ? translate(
+                        'auto.components.settings.AgentsPane.25a41a9aad',
+                        'Re-detect agents installed on the active server'
+                      )
+                    : translate(
+                        'auto.components.settings.AgentsPane.13647f9f80',
+                        'Re-read your shell PATH and re-detect installed agents'
+                      )
+                }
+                className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+              >
+                <RefreshCw className={cn('size-3', isRefreshing && 'animate-spin')} />
+                {isRefreshing
+                  ? translate('auto.components.settings.AgentsPane.c9b33eb5c0', 'Refreshing…')
+                  : translate('auto.components.settings.AgentsPane.0d9e293a02', 'Refresh')}
+              </Button>
+            }
+          />
+
+          <div className="divide-y divide-border/40">
+            {detectedAgents.map((agent) => (
+              <AgentRow
+                key={agent.id}
+                agentId={agent.id}
+                label={agent.label}
+                homepageUrl={agent.homepageUrl}
+                defaultCmd={agent.cmd}
+                defaultArgs={presetDefaultArgsFor(agent.id)}
+                defaultEnv={presetDefaultEnvFor(agent.id)}
+                isDetected
+                isEnabled={isTuiAgentEnabled(agent.id, disabledAgents)}
+                isDefault={defaultAgent === agent.id}
+                cmdOverride={cmdOverrides[agent.id]}
+                argsOverride={resolveTuiAgentLaunchArgs(agent.id, agentDefaultArgs)}
+                envOverride={resolveTuiAgentLaunchEnv(agent.id, agentDefaultEnv)}
+                onSetDefault={() => setDefault(agent.id)}
+                onSetEnabled={(enabled) => setAgentEnabled(agent.id, enabled)}
+                onSaveOverride={(v) => saveOverride(agent.id, v)}
+                onSaveArgs={(v) => saveAgentArgs(agent.id, v)}
+                onSaveEnv={(v) => saveAgentEnv(agent.id, v)}
+                sessionSourceHome={
+                  agent.id === 'codex'
+                    ? buildCodexSessionSourceHomeControl(settings, updateSettings)
+                    : undefined
+                }
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {undetectedAgents.length > 0 && (
+        <section className="space-y-3">
+          <SettingsSubsectionHeader
+            title={
+              <span className="flex items-center gap-2 text-muted-foreground">
+                {translate(
+                  'auto.components.settings.AgentsPane.e8da2af684',
+                  'Available to install'
+                )}
+                <SettingsBadge tone="muted">
+                  {undetectedAgents.length}{' '}
+                  {translate('auto.components.settings.AgentsPane.024bd95089', 'agents')}
+                </SettingsBadge>
+              </span>
+            }
+          />
+
+          <div className="divide-y divide-border/40">
+            {undetectedAgents.map((agent) => (
+              <AgentRow
+                key={agent.id}
+                agentId={agent.id}
+                label={agent.label}
+                homepageUrl={agent.homepageUrl}
+                defaultCmd={agent.cmd}
+                defaultArgs={presetDefaultArgsFor(agent.id)}
+                defaultEnv={presetDefaultEnvFor(agent.id)}
+                isDetected={false}
+                isEnabled={isTuiAgentEnabled(agent.id, disabledAgents)}
+                isDefault={false}
+                cmdOverride={undefined}
+                argsOverride={resolveTuiAgentLaunchArgs(agent.id, agentDefaultArgs)}
+                envOverride={resolveTuiAgentLaunchEnv(agent.id, agentDefaultEnv)}
+                onSetDefault={() => {}}
+                onSetEnabled={(enabled) => setAgentEnabled(agent.id, enabled)}
+                onSaveOverride={() => {}}
+                onSaveArgs={(v) => saveAgentArgs(agent.id, v)}
+                onSaveEnv={(v) => saveAgentEnv(agent.id, v)}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {detectedIds === null && !detectionFailed && (
+        <div className="flex items-center justify-center rounded-md border border-dashed border-border/50 py-6 text-sm text-muted-foreground">
+          {translate(
+            'auto.components.settings.AgentsPane.d83834f5e6',
+            'Detecting installed agents…'
+          )}
+        </div>
+      )}
+
+      {detectionFailed && (
+        <div className="flex items-start justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+          <span className="flex min-w-0 items-start gap-2">
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+            {translate(
+              'auto.components.settings.AgentsPane.remoteDetectionFailed',
+              'Couldn’t detect installed agents. Check the host connection and try again.'
+            )}
+          </span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            onClick={handleRefresh}
+            className="h-6 shrink-0 gap-1.5 px-2 text-destructive hover:text-destructive"
+          >
+            <RefreshCw className="size-3" />
+            {translate('auto.components.settings.AgentsPane.retryDetection', 'Retry')}
+          </Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function AgentStatusHooksSetting({
+  settings,
+  updateSettings
+}: AgentsPaneProps): React.JSX.Element {
+  const enabled = settings.agentStatusHooksEnabled !== false
+  return (
+    <section className="space-y-3">
+      <SettingsSwitchRow
+        label={getAgentStatusHooksTitle()}
+        description={getAgentStatusHooksDescription()}
+        checked={enabled}
+        onChange={() =>
+          updateSettings({
+            agentStatusHooksEnabled: !enabled
+          })
+        }
+        ariaLabel={getAgentStatusHooksTitle()}
+      />
+    </section>
+  )
+}
+
+export function AgentGeneratedTabTitlesSetting({
+  settings,
+  updateSettings
+}: AgentsPaneProps): React.JSX.Element {
+  const enabled = settings.tabAutoGenerateTitle === true
+  return (
+    <section className="space-y-3">
+      <SettingsSwitchRow
+        label={getAgentGeneratedTabTitlesTitle()}
+        description={getAgentGeneratedTabTitlesDescription()}
+        checked={enabled}
+        onChange={() =>
+          updateSettings({
+            tabAutoGenerateTitle: !enabled
+          })
+        }
+        ariaLabel={getAgentGeneratedTabTitlesTitle()}
+      />
+    </section>
+  )
+}

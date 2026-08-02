@@ -1,0 +1,1745 @@
+{
+  "module": "workspace-session-schema",
+  "source": "src/shared/workspace-session-schema.ts",
+  "rustCrate": "orca-config::workspace_session_schema",
+  "cases": [
+    {
+      "function": "parseWorkspaceSession",
+      "note": "minimal valid session (only required fields) parses ok on both legs",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {}
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {},
+          "terminalLayoutsByTabId": {}
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "realistic full blob: terminal tabs + split pane layout with buffers, unified tabs/groups/layouts, editor files, browser tabs/pages/history, sleeping agent session",
+      "input": {
+        "activeRepoId": "repo-orca",
+        "activeWorkspaceKey": "worktree:repo-orca::/userhome/dev/orca-wt-main",
+        "activeWorktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+        "activeTabId": "tab-main",
+        "tabsByWorktree": {
+          "repo-orca::/userhome/dev/orca-wt-main": [
+            {
+              "id": "tab-main",
+              "ptyId": "pty-11",
+              "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+              "title": "zsh",
+              "defaultTitle": "Terminal 1",
+              "generatedTitle": null,
+              "quickCommandLabel": null,
+              "customTitle": null,
+              "color": null,
+              "isPinned": false,
+              "sortOrder": 0,
+              "createdAt": 1751500000000,
+              "generation": 2,
+              "startupCwd": "/userhome/dev/orca-wt-main"
+            },
+            {
+              "id": "tab-agent",
+              "ptyId": null,
+              "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+              "title": "claude",
+              "generatedTitle": "Fix session schema",
+              "customTitle": null,
+              "color": "#7c3aed",
+              "sortOrder": 1,
+              "createdAt": 1751500100000,
+              "launchAgent": "claude"
+            }
+          ]
+        },
+        "terminalLayoutsByTabId": {
+          "tab-main": {
+            "root": {
+              "type": "split",
+              "direction": "horizontal",
+              "first": {
+                "type": "leaf",
+                "leafId": "leaf-a"
+              },
+              "second": {
+                "type": "split",
+                "direction": "vertical",
+                "first": {
+                  "type": "leaf",
+                  "leafId": "leaf-b"
+                },
+                "second": {
+                  "type": "leaf",
+                  "leafId": "leaf-c"
+                },
+                "ratio": 0.4
+              },
+              "ratio": 0.6
+            },
+            "activeLeafId": "leaf-a",
+            "expandedLeafId": null,
+            "ptyIdsByLeafId": {
+              "leaf-a": "pty-11",
+              "leaf-b": "pty-12",
+              "leaf-c": "pty-13"
+            },
+            "buffersByLeafId": {
+              "leaf-a": "$ pnpm test\u001b[32m PASS \u001b[0m\r\n"
+            },
+            "scrollbackRefsByLeafId": {
+              "leaf-b": "scrollback-leaf-b.bin"
+            },
+            "titlesByLeafId": {
+              "leaf-a": "zsh",
+              "leaf-b": "vitest",
+              "leaf-c": "logs"
+            }
+          },
+          "tab-agent": {
+            "root": {
+              "type": "leaf",
+              "leafId": "leaf-d"
+            },
+            "activeLeafId": "leaf-d",
+            "expandedLeafId": null
+          }
+        },
+        "activeWorktreeIdsOnShutdown": [
+          "repo-orca::/userhome/dev/orca-wt-main"
+        ],
+        "openFilesByWorktree": {
+          "repo-orca::/userhome/dev/orca-wt-main": [
+            {
+              "filePath": "/userhome/dev/orca-wt-main/src/shared/types.ts",
+              "relativePath": "src/shared/types.ts",
+              "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+              "language": "typescript",
+              "isPreview": false,
+              "runtimeEnvironmentId": null,
+              "dirtyDraftContent": "// wip\n"
+            }
+          ]
+        },
+        "activeFileIdByWorktree": {
+          "repo-orca::/userhome/dev/orca-wt-main": "/userhome/dev/orca-wt-main/src/shared/types.ts"
+        },
+        "markdownFrontmatterVisible": {
+          "/userhome/dev/orca-wt-main/README.md": true
+        },
+        "browserTabsByWorktree": {
+          "repo-orca::/userhome/dev/orca-wt-main": [
+            {
+              "id": "bw-1",
+              "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+              "label": "Preview",
+              "sessionProfileId": null,
+              "sessionPartition": "persist:orca-profile-default",
+              "activePageId": "pg-1",
+              "pageIds": [
+                "pg-1"
+              ],
+              "url": "http://localhost:5173/",
+              "title": "Orca Dev",
+              "loading": false,
+              "faviconUrl": null,
+              "canGoBack": false,
+              "canGoForward": false,
+              "loadError": null,
+              "createdAt": 1751500200000
+            }
+          ]
+        },
+        "browserPagesByWorkspace": {
+          "bw-1": [
+            {
+              "id": "pg-1",
+              "workspaceId": "bw-1",
+              "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+              "url": "http://localhost:5173/",
+              "title": "Orca Dev",
+              "loading": false,
+              "faviconUrl": null,
+              "canGoBack": false,
+              "canGoForward": false,
+              "loadError": {
+                "code": -102,
+                "description": "ERR_CONNECTION_REFUSED",
+                "validatedUrl": "http://localhost:5173/"
+              },
+              "createdAt": 1751500200000,
+              "browserRuntimeEnvironmentId": null,
+              "viewportPresetId": "laptop"
+            }
+          ]
+        },
+        "activeBrowserTabIdByWorktree": {
+          "repo-orca::/userhome/dev/orca-wt-main": "bw-1"
+        },
+        "activeTabTypeByWorktree": {
+          "repo-orca::/userhome/dev/orca-wt-main": "terminal"
+        },
+        "browserUrlHistory": [
+          {
+            "url": "http://localhost:5173/",
+            "normalizedUrl": "http://localhost:5173",
+            "title": "Orca Dev",
+            "lastVisitedAt": 1751500300000,
+            "visitCount": 4
+          },
+          {
+            "url": "https://docs.orca.dev/guide",
+            "normalizedUrl": "https://docs.orca.dev/guide",
+            "title": "Guide",
+            "lastVisitedAt": 1751500200000,
+            "visitCount": 2
+          }
+        ],
+        "activeTabIdByWorktree": {
+          "repo-orca::/userhome/dev/orca-wt-main": "tab-main"
+        },
+        "unifiedTabs": {
+          "repo-orca::/userhome/dev/orca-wt-main": [
+            {
+              "id": "tab-main",
+              "entityId": "term-entity-1",
+              "groupId": "group-1",
+              "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+              "contentType": "terminal",
+              "label": "zsh",
+              "generatedLabel": null,
+              "quickCommandLabel": null,
+              "customLabel": null,
+              "color": null,
+              "sortOrder": 0,
+              "createdAt": 1751500000000,
+              "isPreview": false,
+              "isPinned": false,
+              "viewMode": "terminal"
+            },
+            {
+              "id": "tab-agent",
+              "entityId": "term-entity-2",
+              "groupId": "group-1",
+              "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+              "contentType": "terminal",
+              "label": "claude",
+              "generatedLabel": "Fix session schema",
+              "customLabel": null,
+              "color": "#7c3aed",
+              "sortOrder": 1,
+              "createdAt": 1751500100000,
+              "viewMode": "chat"
+            },
+            {
+              "id": "tab-editor",
+              "entityId": "/userhome/dev/orca-wt-main/src/shared/types.ts",
+              "groupId": "group-2",
+              "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+              "contentType": "editor",
+              "label": "types.ts",
+              "customLabel": null,
+              "color": null,
+              "sortOrder": 0,
+              "createdAt": 1751500150000,
+              "isPreview": true
+            }
+          ]
+        },
+        "tabGroups": {
+          "repo-orca::/userhome/dev/orca-wt-main": [
+            {
+              "id": "group-1",
+              "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+              "activeTabId": "tab-main",
+              "tabOrder": [
+                "tab-main",
+                "tab-agent"
+              ],
+              "recentTabIds": [
+                "tab-agent"
+              ]
+            },
+            {
+              "id": "group-2",
+              "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+              "activeTabId": "tab-editor",
+              "tabOrder": [
+                "tab-editor"
+              ]
+            }
+          ]
+        },
+        "tabGroupLayouts": {
+          "repo-orca::/userhome/dev/orca-wt-main": {
+            "type": "split",
+            "direction": "horizontal",
+            "first": {
+              "type": "leaf",
+              "groupId": "group-1"
+            },
+            "second": {
+              "type": "leaf",
+              "groupId": "group-2"
+            },
+            "ratio": 0.55
+          }
+        },
+        "activeGroupIdByWorktree": {
+          "repo-orca::/userhome/dev/orca-wt-main": "group-1"
+        },
+        "activeConnectionIdsAtShutdown": [
+          "conn-local"
+        ],
+        "remoteSessionIdsByTabId": {
+          "tab-agent": "remote-sess-9"
+        },
+        "lastVisitedAtByWorktreeId": {
+          "repo-orca::/userhome/dev/orca-wt-main": 1751500300000
+        },
+        "defaultTerminalTabsAppliedByWorktreeId": {
+          "repo-orca::/userhome/dev/orca-wt-main": true
+        },
+        "sleepingAgentSessionsByPaneKey": {
+          "tab-agent__leaf-d": {
+            "paneKey": "tab-agent__leaf-d",
+            "tabId": "tab-agent",
+            "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+            "agent": "codex",
+            "providerSession": {
+              "key": "session_id",
+              "id": "sess-abc123"
+            },
+            "prompt": "Fix the workspace session schema",
+            "state": "done",
+            "capturedAt": 1751500400000,
+            "updatedAt": 1751500400000,
+            "terminalTitle": "codex",
+            "lastAssistantMessage": "Done.",
+            "interrupted": false,
+            "connectionId": null,
+            "launchConfig": {
+              "agentCommand": "codex",
+              "agentArgs": "--resume sess-abc123",
+              "agentEnv": {
+                "ORCA_PANE": "tab-agent__leaf-d"
+              }
+            },
+            "origin": "quit"
+          }
+        }
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": "repo-orca",
+          "activeWorkspaceKey": "worktree:repo-orca::/userhome/dev/orca-wt-main",
+          "activeWorktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+          "activeTabId": "tab-main",
+          "tabsByWorktree": {
+            "repo-orca::/userhome/dev/orca-wt-main": [
+              {
+                "id": "tab-main",
+                "ptyId": "pty-11",
+                "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+                "title": "zsh",
+                "defaultTitle": "Terminal 1",
+                "generatedTitle": null,
+                "quickCommandLabel": null,
+                "customTitle": null,
+                "color": null,
+                "isPinned": false,
+                "sortOrder": 0,
+                "createdAt": 1751500000000,
+                "generation": 2,
+                "startupCwd": "/userhome/dev/orca-wt-main"
+              },
+              {
+                "id": "tab-agent",
+                "ptyId": null,
+                "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+                "title": "claude",
+                "generatedTitle": "Fix session schema",
+                "customTitle": null,
+                "color": "#7c3aed",
+                "sortOrder": 1,
+                "createdAt": 1751500100000,
+                "launchAgent": "claude"
+              }
+            ]
+          },
+          "terminalLayoutsByTabId": {
+            "tab-main": {
+              "root": {
+                "type": "split",
+                "direction": "horizontal",
+                "first": {
+                  "type": "leaf",
+                  "leafId": "leaf-a"
+                },
+                "second": {
+                  "type": "split",
+                  "direction": "vertical",
+                  "first": {
+                    "type": "leaf",
+                    "leafId": "leaf-b"
+                  },
+                  "second": {
+                    "type": "leaf",
+                    "leafId": "leaf-c"
+                  },
+                  "ratio": 0.4
+                },
+                "ratio": 0.6
+              },
+              "activeLeafId": "leaf-a",
+              "expandedLeafId": null,
+              "ptyIdsByLeafId": {
+                "leaf-a": "pty-11",
+                "leaf-b": "pty-12",
+                "leaf-c": "pty-13"
+              },
+              "buffersByLeafId": {
+                "leaf-a": "$ pnpm test\u001b[32m PASS \u001b[0m\r\n"
+              },
+              "scrollbackRefsByLeafId": {
+                "leaf-b": "scrollback-leaf-b.bin"
+              },
+              "titlesByLeafId": {
+                "leaf-a": "zsh",
+                "leaf-b": "vitest",
+                "leaf-c": "logs"
+              }
+            },
+            "tab-agent": {
+              "root": {
+                "type": "leaf",
+                "leafId": "leaf-d"
+              },
+              "activeLeafId": "leaf-d",
+              "expandedLeafId": null
+            }
+          },
+          "activeWorktreeIdsOnShutdown": [
+            "repo-orca::/userhome/dev/orca-wt-main"
+          ],
+          "openFilesByWorktree": {
+            "repo-orca::/userhome/dev/orca-wt-main": [
+              {
+                "filePath": "/userhome/dev/orca-wt-main/src/shared/types.ts",
+                "relativePath": "src/shared/types.ts",
+                "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+                "language": "typescript",
+                "isPreview": false,
+                "runtimeEnvironmentId": null,
+                "dirtyDraftContent": "// wip\n"
+              }
+            ]
+          },
+          "activeFileIdByWorktree": {
+            "repo-orca::/userhome/dev/orca-wt-main": "/userhome/dev/orca-wt-main/src/shared/types.ts"
+          },
+          "markdownFrontmatterVisible": {
+            "/userhome/dev/orca-wt-main/README.md": true
+          },
+          "browserTabsByWorktree": {
+            "repo-orca::/userhome/dev/orca-wt-main": [
+              {
+                "id": "bw-1",
+                "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+                "label": "Preview",
+                "sessionProfileId": null,
+                "sessionPartition": "persist:orca-profile-default",
+                "activePageId": "pg-1",
+                "pageIds": [
+                  "pg-1"
+                ],
+                "url": "http://localhost:5173/",
+                "title": "Orca Dev",
+                "loading": false,
+                "faviconUrl": null,
+                "canGoBack": false,
+                "canGoForward": false,
+                "loadError": null,
+                "createdAt": 1751500200000
+              }
+            ]
+          },
+          "browserPagesByWorkspace": {
+            "bw-1": [
+              {
+                "id": "pg-1",
+                "workspaceId": "bw-1",
+                "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+                "url": "http://localhost:5173/",
+                "title": "Orca Dev",
+                "loading": false,
+                "faviconUrl": null,
+                "canGoBack": false,
+                "canGoForward": false,
+                "loadError": {
+                  "code": -102,
+                  "description": "ERR_CONNECTION_REFUSED",
+                  "validatedUrl": "http://localhost:5173/"
+                },
+                "createdAt": 1751500200000,
+                "browserRuntimeEnvironmentId": null,
+                "viewportPresetId": "laptop"
+              }
+            ]
+          },
+          "activeBrowserTabIdByWorktree": {
+            "repo-orca::/userhome/dev/orca-wt-main": "bw-1"
+          },
+          "activeTabTypeByWorktree": {
+            "repo-orca::/userhome/dev/orca-wt-main": "terminal"
+          },
+          "browserUrlHistory": [
+            {
+              "url": "http://localhost:5173/",
+              "normalizedUrl": "http://localhost:5173",
+              "title": "Orca Dev",
+              "lastVisitedAt": 1751500300000,
+              "visitCount": 4
+            },
+            {
+              "url": "https://docs.orca.dev/guide",
+              "normalizedUrl": "https://docs.orca.dev/guide",
+              "title": "Guide",
+              "lastVisitedAt": 1751500200000,
+              "visitCount": 2
+            }
+          ],
+          "activeTabIdByWorktree": {
+            "repo-orca::/userhome/dev/orca-wt-main": "tab-main"
+          },
+          "unifiedTabs": {
+            "repo-orca::/userhome/dev/orca-wt-main": [
+              {
+                "id": "tab-main",
+                "entityId": "term-entity-1",
+                "groupId": "group-1",
+                "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+                "contentType": "terminal",
+                "label": "zsh",
+                "generatedLabel": null,
+                "quickCommandLabel": null,
+                "customLabel": null,
+                "color": null,
+                "sortOrder": 0,
+                "createdAt": 1751500000000,
+                "isPreview": false,
+                "isPinned": false,
+                "viewMode": "terminal"
+              },
+              {
+                "id": "tab-agent",
+                "entityId": "term-entity-2",
+                "groupId": "group-1",
+                "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+                "contentType": "terminal",
+                "label": "claude",
+                "generatedLabel": "Fix session schema",
+                "customLabel": null,
+                "color": "#7c3aed",
+                "sortOrder": 1,
+                "createdAt": 1751500100000,
+                "viewMode": "chat"
+              },
+              {
+                "id": "tab-editor",
+                "entityId": "/userhome/dev/orca-wt-main/src/shared/types.ts",
+                "groupId": "group-2",
+                "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+                "contentType": "editor",
+                "label": "types.ts",
+                "customLabel": null,
+                "color": null,
+                "sortOrder": 0,
+                "createdAt": 1751500150000,
+                "isPreview": true
+              }
+            ]
+          },
+          "tabGroups": {
+            "repo-orca::/userhome/dev/orca-wt-main": [
+              {
+                "id": "group-1",
+                "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+                "activeTabId": "tab-main",
+                "tabOrder": [
+                  "tab-main",
+                  "tab-agent"
+                ],
+                "recentTabIds": [
+                  "tab-agent"
+                ]
+              },
+              {
+                "id": "group-2",
+                "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+                "activeTabId": "tab-editor",
+                "tabOrder": [
+                  "tab-editor"
+                ]
+              }
+            ]
+          },
+          "tabGroupLayouts": {
+            "repo-orca::/userhome/dev/orca-wt-main": {
+              "type": "split",
+              "direction": "horizontal",
+              "first": {
+                "type": "leaf",
+                "groupId": "group-1"
+              },
+              "second": {
+                "type": "leaf",
+                "groupId": "group-2"
+              },
+              "ratio": 0.55
+            }
+          },
+          "activeGroupIdByWorktree": {
+            "repo-orca::/userhome/dev/orca-wt-main": "group-1"
+          },
+          "activeConnectionIdsAtShutdown": [
+            "conn-local"
+          ],
+          "remoteSessionIdsByTabId": {
+            "tab-agent": "remote-sess-9"
+          },
+          "lastVisitedAtByWorktreeId": {
+            "repo-orca::/userhome/dev/orca-wt-main": 1751500300000
+          },
+          "defaultTerminalTabsAppliedByWorktreeId": {
+            "repo-orca::/userhome/dev/orca-wt-main": true
+          },
+          "sleepingAgentSessionsByPaneKey": {
+            "tab-agent__leaf-d": {
+              "paneKey": "tab-agent__leaf-d",
+              "tabId": "tab-agent",
+              "worktreeId": "repo-orca::/userhome/dev/orca-wt-main",
+              "agent": "codex",
+              "providerSession": {
+                "key": "session_id",
+                "id": "sess-abc123"
+              },
+              "prompt": "Fix the workspace session schema",
+              "state": "done",
+              "capturedAt": 1751500400000,
+              "updatedAt": 1751500400000,
+              "terminalTitle": "codex",
+              "lastAssistantMessage": "Done.",
+              "interrupted": false,
+              "connectionId": null,
+              "launchConfig": {
+                "agentCommand": "codex",
+                "agentArgs": "--resume sess-abc123",
+                "agentEnv": {
+                  "ORCA_PANE": "tab-agent__leaf-d"
+                }
+              },
+              "origin": "quit"
+            }
+          }
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "unknown keys at four depths (top level, terminal tab, layout snapshot, layout leaf node) are stripped by z.object on both legs",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "sessionSchemaVersion": 42,
+        "tabsByWorktree": {
+          "wt-1": [
+            {
+              "id": "tab-1",
+              "ptyId": null,
+              "worktreeId": "wt-1",
+              "title": "zsh",
+              "customTitle": null,
+              "color": null,
+              "sortOrder": 0,
+              "createdAt": 1751500000000,
+              "legacyPaneState": {
+                "zoom": 2
+              }
+            }
+          ]
+        },
+        "terminalLayoutsByTabId": {
+          "tab-1": {
+            "root": {
+              "type": "leaf",
+              "leafId": "leaf-a",
+              "legacySize": 120
+            },
+            "activeLeafId": "leaf-a",
+            "expandedLeafId": null,
+            "zoomLevel": 1.5
+          }
+        }
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {
+            "wt-1": [
+              {
+                "id": "tab-1",
+                "ptyId": null,
+                "worktreeId": "wt-1",
+                "title": "zsh",
+                "customTitle": null,
+                "color": null,
+                "sortOrder": 0,
+                "createdAt": 1751500000000
+              }
+            ]
+          },
+          "terminalLayoutsByTabId": {
+            "tab-1": {
+              "root": {
+                "type": "leaf",
+                "leafId": "leaf-a"
+              },
+              "activeLeafId": "leaf-a",
+              "expandedLeafId": null
+            }
+          }
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "missing required tabsByWorktree — both legs reject at the same path with zod 4.4.3 wording",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "terminalLayoutsByTabId": {}
+      },
+      "expected": {
+        "ok": false,
+        "error": "tabsByWorktree: Invalid input: expected record, received undefined"
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "wrong-typed field (ptyId as number, the motivating corruption) — same rejection path and zod 4.4.3 wording on both legs",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {
+          "wt-1": [
+            {
+              "id": "tab-1",
+              "ptyId": 42,
+              "worktreeId": "wt-1",
+              "title": "zsh",
+              "customTitle": null,
+              "color": null,
+              "sortOrder": 0,
+              "createdAt": 1751500000000
+            }
+          ]
+        },
+        "terminalLayoutsByTabId": {}
+      },
+      "expected": {
+        "ok": false,
+        "error": "tabsByWorktree.wt-1.0.ptyId: Invalid input: expected string, received number"
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "legacy repair: stale launchAgent id is dropped from the tab without failing the session (zod .catch(undefined) == Rust repair)",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {
+          "wt-1": [
+            {
+              "id": "tab-1",
+              "ptyId": null,
+              "worktreeId": "wt-1",
+              "title": "bash",
+              "customTitle": null,
+              "color": null,
+              "sortOrder": 0,
+              "createdAt": 1751500000000,
+              "launchAgent": "totally-retired-agent"
+            }
+          ]
+        },
+        "terminalLayoutsByTabId": {}
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {
+            "wt-1": [
+              {
+                "id": "tab-1",
+                "ptyId": null,
+                "worktreeId": "wt-1",
+                "title": "bash",
+                "customTitle": null,
+                "color": null,
+                "sortOrder": 0,
+                "createdAt": 1751500000000
+              }
+            ]
+          },
+          "terminalLayoutsByTabId": {}
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "legacy repair: corrupted lastVisitedAtByWorktreeId entries (null, negative, string) are dropped entry-wise instead of failing the session",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "lastVisitedAtByWorktreeId": {
+          "wt-good": 1751500300000,
+          "wt-nullish": null,
+          "wt-negative": -5,
+          "wt-string": "soon"
+        }
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {},
+          "terminalLayoutsByTabId": {},
+          "lastVisitedAtByWorktreeId": {
+            "wt-good": 1751500300000
+          }
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "legacy repair: browserUrlHistory is re-sorted by recency, deduped by normalized URL (host case + trailing slash), and Kagi session tokens are redacted",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "browserUrlHistory": [
+          {
+            "url": "https://EXAMPLE.com/Docs",
+            "normalizedUrl": "stale-a",
+            "title": "Docs (old)",
+            "lastVisitedAt": 100,
+            "visitCount": 3
+          },
+          {
+            "url": "https://example.com/Docs/",
+            "normalizedUrl": "stale-b",
+            "title": "Docs (new)",
+            "lastVisitedAt": 300,
+            "visitCount": 5
+          },
+          {
+            "url": "https://kagi.com/search?q=orca+rust&token=SECRET123",
+            "normalizedUrl": "stale-c",
+            "title": "Kagi search",
+            "lastVisitedAt": 200,
+            "visitCount": 1
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {},
+          "terminalLayoutsByTabId": {},
+          "browserUrlHistory": [
+            {
+              "url": "https://example.com/Docs/",
+              "normalizedUrl": "https://example.com/Docs",
+              "title": "Docs (new)",
+              "lastVisitedAt": 300,
+              "visitCount": 5
+            },
+            {
+              "url": "https://kagi.com/search?q=orca+rust",
+              "normalizedUrl": "https://kagi.com/search?q=orca+rust",
+              "title": "Kagi search",
+              "lastVisitedAt": 200,
+              "visitCount": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "empty object — both legs reject at the first required field (activeRepoId) with zod 4.4.3 wording",
+      "input": {},
+      "expected": {
+        "ok": false,
+        "error": "activeRepoId: Invalid input: expected string, received undefined"
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "null root — both legs reject at <root> with zod 4.4.3 wording",
+      "input": null,
+      "expected": {
+        "ok": false,
+        "error": "<root>: Invalid input: expected object, received null"
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "array where a record is expected (tabsByWorktree) — both legs reject at the same path with zod 4.4.3 wording",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": [],
+        "terminalLayoutsByTabId": {}
+      },
+      "expected": {
+        "ok": false,
+        "error": "tabsByWorktree: Invalid input: expected record, received array"
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "terminal tab id containing ':' — the shared refine message matches exactly on both legs (same path, same wording)",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {
+          "wt-1": [
+            {
+              "id": "tab:with-colon",
+              "ptyId": null,
+              "worktreeId": "wt-1",
+              "title": "zsh",
+              "customTitle": null,
+              "color": null,
+              "sortOrder": 0,
+              "createdAt": 1751500000000
+            }
+          ]
+        },
+        "terminalLayoutsByTabId": {}
+      },
+      "expected": {
+        "ok": false,
+        "error": "tabsByWorktree.wt-1.0.id: terminal tab id must not contain \":\""
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "unknown unified-tab viewMode — .catch repairs it to 'terminal' on both legs",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "unifiedTabs": {
+          "wt-1": [
+            {
+              "id": "tab-1",
+              "entityId": "term-entity-1",
+              "groupId": "group-1",
+              "worktreeId": "wt-1",
+              "contentType": "terminal",
+              "label": "zsh",
+              "customLabel": null,
+              "color": null,
+              "sortOrder": 0,
+              "createdAt": 1751500000000,
+              "viewMode": "canvas"
+            }
+          ]
+        }
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {},
+          "terminalLayoutsByTabId": {},
+          "unifiedTabs": {
+            "wt-1": [
+              {
+                "id": "tab-1",
+                "entityId": "term-entity-1",
+                "groupId": "group-1",
+                "worktreeId": "wt-1",
+                "contentType": "terminal",
+                "label": "zsh",
+                "customLabel": null,
+                "color": null,
+                "sortOrder": 0,
+                "createdAt": 1751500000000,
+                "viewMode": "terminal"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "contentType 'simulator' (and 'check-details') are valid enum members accepted on both legs",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "unifiedTabs": {
+          "wt-1": [
+            {
+              "id": "tab-sim",
+              "entityId": "sim-entity-1",
+              "groupId": "group-1",
+              "worktreeId": "wt-1",
+              "contentType": "simulator",
+              "label": "iOS Simulator",
+              "customLabel": null,
+              "color": null,
+              "sortOrder": 0,
+              "createdAt": 1751500000000
+            }
+          ]
+        }
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {},
+          "terminalLayoutsByTabId": {},
+          "unifiedTabs": {
+            "wt-1": [
+              {
+                "id": "tab-sim",
+                "entityId": "sim-entity-1",
+                "groupId": "group-1",
+                "worktreeId": "wt-1",
+                "contentType": "simulator",
+                "label": "iOS Simulator",
+                "customLabel": null,
+                "color": null,
+                "sortOrder": 0,
+                "createdAt": 1751500000000
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "invalid activeWorkspaceKey — both legs validate via isWorkspaceKey and reject with z.custom's 'Invalid input'",
+      "input": {
+        "activeRepoId": null,
+        "activeWorkspaceKey": "not-a-workspace-key",
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {}
+      },
+      "expected": {
+        "ok": false,
+        "error": "activeWorkspaceKey: Invalid input"
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "sleepingAgentSessionsByPaneKey cleanup — both legs drop the invalid record and trim the provider session id",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "sleepingAgentSessionsByPaneKey": {
+          "pane-good": {
+            "paneKey": "pane-good",
+            "worktreeId": "wt-1",
+            "agent": "claude",
+            "providerSession": {
+              "key": "session_id",
+              "id": "  sess-42  "
+            },
+            "prompt": "resume me",
+            "state": "waiting",
+            "capturedAt": 1751500400000,
+            "updatedAt": 1751500500000
+          },
+          "pane-broken": {
+            "paneKey": "pane-broken",
+            "worktreeId": "",
+            "agent": "claude",
+            "providerSession": {
+              "key": "session_id",
+              "id": "sess-43"
+            },
+            "prompt": "broken record",
+            "state": "waiting",
+            "capturedAt": 1751500400000,
+            "updatedAt": 1751500500000
+          }
+        }
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {},
+          "terminalLayoutsByTabId": {},
+          "sleepingAgentSessionsByPaneKey": {
+            "pane-good": {
+              "paneKey": "pane-good",
+              "worktreeId": "wt-1",
+              "agent": "claude",
+              "providerSession": {
+                "key": "session_id",
+                "id": "sess-42"
+              },
+              "prompt": "resume me",
+              "state": "waiting",
+              "capturedAt": 1751500400000,
+              "updatedAt": 1751500500000
+            }
+          }
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "invalid terminalLayoutsByTabId record key (contains ':') — both legs reject the key with zod's invalid_key wording",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {
+          "bad:key": {
+            "root": null,
+            "activeLeafId": null,
+            "expandedLeafId": null
+          }
+        }
+      },
+      "expected": {
+        "ok": false,
+        "error": "terminalLayoutsByTabId.bad:key: Invalid key in record"
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "empty startupCwd — both legs enforce .min(1) and reject with zod's too_small wording",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {
+          "wt-1": [
+            {
+              "id": "tab-1",
+              "ptyId": null,
+              "worktreeId": "wt-1",
+              "title": "zsh",
+              "customTitle": null,
+              "color": null,
+              "sortOrder": 0,
+              "createdAt": 1751500000000,
+              "startupCwd": ""
+            }
+          ]
+        },
+        "terminalLayoutsByTabId": {}
+      },
+      "expected": {
+        "ok": false,
+        "error": "tabsByWorktree.wt-1.0.startupCwd: Too small: expected string to have >=1 characters"
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "browserUrlHistory url normalization: https://github.com/anthropics/claude-code",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "browserUrlHistory": [
+          {
+            "url": "https://github.com/anthropics/claude-code",
+            "normalizedUrl": "stale",
+            "title": "t0",
+            "lastVisitedAt": 1000,
+            "visitCount": 1
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {},
+          "terminalLayoutsByTabId": {},
+          "browserUrlHistory": [
+            {
+              "url": "https://github.com/anthropics/claude-code",
+              "normalizedUrl": "https://github.com/anthropics/claude-code",
+              "title": "t0",
+              "lastVisitedAt": 1000,
+              "visitCount": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "browserUrlHistory url normalization: https://GitHub.com/Anthropics/Claude-Code",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "browserUrlHistory": [
+          {
+            "url": "https://GitHub.com/Anthropics/Claude-Code",
+            "normalizedUrl": "stale",
+            "title": "t1",
+            "lastVisitedAt": 1001,
+            "visitCount": 1
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {},
+          "terminalLayoutsByTabId": {},
+          "browserUrlHistory": [
+            {
+              "url": "https://GitHub.com/Anthropics/Claude-Code",
+              "normalizedUrl": "https://github.com/Anthropics/Claude-Code",
+              "title": "t1",
+              "lastVisitedAt": 1001,
+              "visitCount": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "browserUrlHistory url normalization: https://google.com/",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "browserUrlHistory": [
+          {
+            "url": "https://google.com/",
+            "normalizedUrl": "stale",
+            "title": "t2",
+            "lastVisitedAt": 1002,
+            "visitCount": 1
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {},
+          "terminalLayoutsByTabId": {},
+          "browserUrlHistory": [
+            {
+              "url": "https://google.com/",
+              "normalizedUrl": "https://google.com",
+              "title": "t2",
+              "lastVisitedAt": 1002,
+              "visitCount": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "browserUrlHistory url normalization: https://www.google.com/search?q=rust+wasm",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "browserUrlHistory": [
+          {
+            "url": "https://www.google.com/search?q=rust+wasm",
+            "normalizedUrl": "stale",
+            "title": "t3",
+            "lastVisitedAt": 1003,
+            "visitCount": 1
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {},
+          "terminalLayoutsByTabId": {},
+          "browserUrlHistory": [
+            {
+              "url": "https://www.google.com/search?q=rust+wasm",
+              "normalizedUrl": "https://www.google.com/search?q=rust+wasm",
+              "title": "t3",
+              "lastVisitedAt": 1003,
+              "visitCount": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "browserUrlHistory url normalization: https://example.com/a/b/c#frag",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "browserUrlHistory": [
+          {
+            "url": "https://example.com/a/b/c#frag",
+            "normalizedUrl": "stale",
+            "title": "t4",
+            "lastVisitedAt": 1004,
+            "visitCount": 1
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {},
+          "terminalLayoutsByTabId": {},
+          "browserUrlHistory": [
+            {
+              "url": "https://example.com/a/b/c#frag",
+              "normalizedUrl": "https://example.com/a/b/c#frag",
+              "title": "t4",
+              "lastVisitedAt": 1004,
+              "visitCount": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "browserUrlHistory url normalization: http://example.com:80/path",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "browserUrlHistory": [
+          {
+            "url": "http://example.com:80/path",
+            "normalizedUrl": "stale",
+            "title": "t5",
+            "lastVisitedAt": 1005,
+            "visitCount": 1
+          }
+        ]
+      },
+      "allowDivergence": "browserUrlHistory dedup key: TS `new URL()` strips the default port (http :80) per WHATWG; the Rust hand-rolled normalizer (no vendored WHATWG parser) keeps ':80'. Low-stakes self-healing history field."
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "browserUrlHistory url normalization: https://example.com:443/path",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "browserUrlHistory": [
+          {
+            "url": "https://example.com:443/path",
+            "normalizedUrl": "stale",
+            "title": "t6",
+            "lastVisitedAt": 1006,
+            "visitCount": 1
+          }
+        ]
+      },
+      "allowDivergence": "browserUrlHistory dedup key: TS `new URL()` strips the default port (https :443) per WHATWG; the Rust hand-rolled normalizer keeps ':443'. Low-stakes self-healing history field."
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "browserUrlHistory url normalization: https://example.com/a/./b/../c",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "browserUrlHistory": [
+          {
+            "url": "https://example.com/a/./b/../c",
+            "normalizedUrl": "stale",
+            "title": "t7",
+            "lastVisitedAt": 1007,
+            "visitCount": 1
+          }
+        ]
+      },
+      "allowDivergence": "browserUrlHistory dedup key: TS `new URL()` resolves path dot-segments ('/a/./b/../c'->'/a/c') per WHATWG; the Rust hand-rolled normalizer keeps the path verbatim. Low-stakes self-healing history field."
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "browserUrlHistory url normalization: https://example.com/%7euser",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "browserUrlHistory": [
+          {
+            "url": "https://example.com/%7euser",
+            "normalizedUrl": "stale",
+            "title": "t8",
+            "lastVisitedAt": 1008,
+            "visitCount": 1
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {},
+          "terminalLayoutsByTabId": {},
+          "browserUrlHistory": [
+            {
+              "url": "https://example.com/%7euser",
+              "normalizedUrl": "https://example.com/%7euser",
+              "title": "t8",
+              "lastVisitedAt": 1008,
+              "visitCount": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "browserUrlHistory url normalization: https://münchen.de/straße",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "browserUrlHistory": [
+          {
+            "url": "https://münchen.de/straße",
+            "normalizedUrl": "stale",
+            "title": "t9",
+            "lastVisitedAt": 1009,
+            "visitCount": 1
+          }
+        ]
+      },
+      "allowDivergence": "browserUrlHistory dedup key: TS `new URL()` applies IDNA punycode to the host and percent-encodes the non-ASCII path; the Rust hand-rolled normalizer only ASCII-lowercases and keeps Unicode verbatim. Low-stakes self-healing history field."
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "browserUrlHistory url normalization: https://xn--mnchen-3ya.de/path",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "browserUrlHistory": [
+          {
+            "url": "https://xn--mnchen-3ya.de/path",
+            "normalizedUrl": "stale",
+            "title": "t10",
+            "lastVisitedAt": 1010,
+            "visitCount": 1
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {},
+          "terminalLayoutsByTabId": {},
+          "browserUrlHistory": [
+            {
+              "url": "https://xn--mnchen-3ya.de/path",
+              "normalizedUrl": "https://xn--mnchen-3ya.de/path",
+              "title": "t10",
+              "lastVisitedAt": 1010,
+              "visitCount": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "browserUrlHistory url normalization: https://user:Pass@Example.com/x",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "browserUrlHistory": [
+          {
+            "url": "https://user:Pass@Example.com/x",
+            "normalizedUrl": "stale",
+            "title": "t11",
+            "lastVisitedAt": 1011,
+            "visitCount": 1
+          }
+        ]
+      },
+      "allowDivergence": "browserUrlHistory dedup key: TS `new URL()` lowercases only the host, preserving userinfo case ('user:Pass@'); the Rust hand-rolled normalizer ASCII-lowercases the whole authority. Low-stakes self-healing history field."
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "browserUrlHistory url normalization: about:blank",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "browserUrlHistory": [
+          {
+            "url": "about:blank",
+            "normalizedUrl": "stale",
+            "title": "t12",
+            "lastVisitedAt": 1012,
+            "visitCount": 1
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {},
+          "terminalLayoutsByTabId": {},
+          "browserUrlHistory": [
+            {
+              "url": "about:blank",
+              "normalizedUrl": "about:blank",
+              "title": "t12",
+              "lastVisitedAt": 1012,
+              "visitCount": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "browserUrlHistory url normalization: file:///userhome/me/notes.md",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "browserUrlHistory": [
+          {
+            "url": "file:///userhome/me/notes.md",
+            "normalizedUrl": "stale",
+            "title": "t13",
+            "lastVisitedAt": 1013,
+            "visitCount": 1
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {},
+          "terminalLayoutsByTabId": {},
+          "browserUrlHistory": [
+            {
+              "url": "file:///userhome/me/notes.md",
+              "normalizedUrl": "file:///userhome/me/notes.md",
+              "title": "t13",
+              "lastVisitedAt": 1013,
+              "visitCount": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "browserUrlHistory url normalization: not a url at all",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "browserUrlHistory": [
+          {
+            "url": "not a url at all",
+            "normalizedUrl": "stale",
+            "title": "t14",
+            "lastVisitedAt": 1014,
+            "visitCount": 1
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {},
+          "terminalLayoutsByTabId": {},
+          "browserUrlHistory": [
+            {
+              "url": "not a url at all",
+              "normalizedUrl": "not a url at all",
+              "title": "t14",
+              "lastVisitedAt": 1014,
+              "visitCount": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "function": "parseWorkspaceSession",
+      "note": "browserUrlHistory url normalization: HTTPS://EXAMPLE.COM/UPPER",
+      "input": {
+        "activeRepoId": null,
+        "activeWorktreeId": null,
+        "activeTabId": null,
+        "tabsByWorktree": {},
+        "terminalLayoutsByTabId": {},
+        "browserUrlHistory": [
+          {
+            "url": "HTTPS://EXAMPLE.COM/UPPER",
+            "normalizedUrl": "stale",
+            "title": "t15",
+            "lastVisitedAt": 1015,
+            "visitCount": 1
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "activeRepoId": null,
+          "activeWorktreeId": null,
+          "activeTabId": null,
+          "tabsByWorktree": {},
+          "terminalLayoutsByTabId": {},
+          "browserUrlHistory": [
+            {
+              "url": "HTTPS://EXAMPLE.COM/UPPER",
+              "normalizedUrl": "https://example.com/UPPER",
+              "title": "t15",
+              "lastVisitedAt": 1015,
+              "visitCount": 1
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

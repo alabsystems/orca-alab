@@ -1,0 +1,177 @@
+import { Buffer } from 'node:buffer'
+import type { AzureDevOpsRepoRef } from './repository-ref'
+import { cancelUnreadResponseBody } from '../lib/unread-response-body'
+import { isLoopbackHost } from '../source-control/loopback-host'
+import {
+  fetchHostedReviewSameOrigin,
+  readHostedReviewJsonBody
+} from '../source-control/hosted-review-api-request'
+
+const REQUEST_TIMEOUT_MS = 5000
+
+type AzureDevOpsAuthConfig = {
+  apiBaseUrl: string | null
+  pat: string | null
+  accessToken: string | null
+  username: string | null
+}
+
+export type AzureDevOpsRequestOptions = {
+  searchParams?: Record<string, string | number>
+  timeoutMs?: number
+}
+
+function envValue(name: string): string | null {
+  const value = process.env[name]?.trim() ?? ''
+  return value.length > 0 ? value : null
+}
+
+export function normalizeAzureDevOpsApiBaseUrl(value: string): string {
+  return value
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/_apis$/i, '')
+}
+
+export function getAzureDevOpsAuthConfig(): AzureDevOpsAuthConfig {
+  return {
+    apiBaseUrl: envValue('ORCA_AZURE_DEVOPS_API_BASE_URL'),
+    pat: envValue('ORCA_AZURE_DEVOPS_TOKEN') ?? envValue('ORCA_AZURE_DEVOPS_PAT'),
+    accessToken: envValue('ORCA_AZURE_DEVOPS_ACCESS_TOKEN'),
+    username: envValue('ORCA_AZURE_DEVOPS_USERNAME')
+  }
+}
+
+export function azureDevOpsTokenConfigured(config: AzureDevOpsAuthConfig): boolean {
+  return Boolean(config.pat || config.accessToken)
+}
+
+function authHeaders(config: AzureDevOpsAuthConfig): Record<string, string> {
+  if (config.accessToken) {
+    return { Authorization: `Bearer ${config.accessToken}` }
+  }
+  if (config.pat) {
+    const encoded = Buffer.from(`${config.username ?? ''}:${config.pat}`).toString('base64')
+    return { Authorization: `Basic ${encoded}` }
+  }
+  return {}
+}
+
+function configuredApiBaseUrl(repo: AzureDevOpsRepoRef): string {
+  const configured = getAzureDevOpsAuthConfig().apiBaseUrl
+  return configured ? normalizeAzureDevOpsApiBaseUrl(configured) : repo.apiBaseUrl
+}
+
+// Why: cloud hosts are Microsoft-owned and always https, so the token may go to
+// them without an explicitly configured base URL.
+function isTrustedCloudHost(hostname: string): boolean {
+  const host = hostname.toLowerCase()
+  return (
+    host === 'dev.azure.com' ||
+    host.endsWith('.dev.azure.com') ||
+    host.endsWith('.visualstudio.com')
+  )
+}
+
+function configuredApiHost(config: AzureDevOpsAuthConfig): string | null {
+  if (!config.apiBaseUrl) {
+    return null
+  }
+  try {
+    const url = new URL(normalizeAzureDevOpsApiBaseUrl(config.apiBaseUrl))
+    // Why: a configured base URL host is a valid recipient over https, or over http
+    // when loopback (a tunnelled/local Server); never a cleartext non-loopback host.
+    return url.protocol === 'https:' || isLoopbackHost(url.hostname)
+      ? url.hostname.toLowerCase()
+      : null
+  } catch {
+    return null
+  }
+}
+
+// Why: the PAT/access token is a bearer credential. Attach it only over https (or
+// loopback) and only to a trusted host — a Microsoft cloud host or the exact host the
+// user explicitly configured via ORCA_AZURE_DEVOPS_API_BASE_URL. A repo-remote-derived
+// Server base URL is attacker-controllable (crafted `.git/config`) and may be a
+// cleartext non-loopback host, so it must never receive the token (cleartext/wrong-host exfil).
+function mayReceiveToken(requestUrl: URL, config: AzureDevOpsAuthConfig): boolean {
+  const host = requestUrl.hostname.toLowerCase()
+  if (requestUrl.protocol !== 'https:' && !isLoopbackHost(host)) {
+    return false
+  }
+  if (isTrustedCloudHost(host)) {
+    return true
+  }
+  const configuredHost = configuredApiHost(config)
+  return configuredHost !== null && host === configuredHost
+}
+
+// Why: single choke point for both read and write paths — the token-bearing
+// Authorization header is returned only when `requestUrl` passes the https +
+// trusted-host binding, so no caller (e.g. PR creation) can re-derive an
+// ungated header and leak the PAT to a remote-controlled http/wrong host.
+export function azureDevOpsAuthHeadersForUrl(requestUrl: URL): Record<string, string> {
+  const config = getAzureDevOpsAuthConfig()
+  return mayReceiveToken(requestUrl, config) ? authHeaders(config) : {}
+}
+
+function apiUrl(
+  baseUrl: string,
+  path: string,
+  searchParams?: AzureDevOpsRequestOptions['searchParams']
+): URL {
+  const url = new URL(`${baseUrl.replace(/\/+$/, '')}${path}`)
+  const params = { ...searchParams, 'api-version': searchParams?.['api-version'] ?? '7.1' }
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, String(value))
+  }
+  return url
+}
+
+export async function requestAzureDevOpsJsonAtBase<T>(
+  baseUrl: string,
+  path: string,
+  options: AzureDevOpsRequestOptions = {},
+  // Why: the existing-review lookup behind Create must distinguish a real
+  // transport/auth failure from an accepted "no PR". When true, a failed request
+  // throws instead of collapsing to null so callers never report false not_found.
+  throwOnFailure = false
+): Promise<T | null> {
+  const config = getAzureDevOpsAuthConfig()
+  try {
+    const url = apiUrl(baseUrl, path, options.searchParams)
+    const headers: Record<string, string> = { Accept: 'application/json' }
+    if (mayReceiveToken(url, config)) {
+      Object.assign(headers, authHeaders(config))
+    }
+    // Why: same-origin-only redirects keep the mayReceiveToken decision above valid for
+    // every hop, and the bounded read stops a hostile Server from OOM-killing main.
+    const response = await fetchHostedReviewSameOrigin(
+      url,
+      { headers },
+      AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS)
+    )
+    if (!response.ok) {
+      await cancelUnreadResponseBody(response)
+      if (throwOnFailure) {
+        throw new Error(`Azure DevOps request failed: HTTP ${response.status}`)
+      }
+      return null
+    }
+    return await readHostedReviewJsonBody<T>(response)
+  } catch (error) {
+    if (throwOnFailure) {
+      throw error
+    }
+    return null
+  }
+}
+
+export function requestAzureDevOpsJson<T>(
+  repo: AzureDevOpsRepoRef,
+  path: string,
+  options: AzureDevOpsRequestOptions = {},
+  throwOnFailure = false
+): Promise<T | null> {
+  return requestAzureDevOpsJsonAtBase(configuredApiBaseUrl(repo), path, options, throwOnFailure)
+}

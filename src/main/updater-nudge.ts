@@ -1,0 +1,98 @@
+import { net } from 'electron'
+import { compareVersions, isValidVersion } from './updater-fallback'
+import { UPDATE_NUDGE_URL } from './updater-feed-endpoints'
+
+export type NudgeConfig = {
+  id: string
+  minVersion?: string
+  maxVersion?: string
+}
+
+export async function fetchNudge(
+  nudgeUrl: string | null = UPDATE_NUDGE_URL
+): Promise<NudgeConfig | null> {
+  // Why: the fork has no nudge service; staying dormant beats polling the
+  // public vendor's endpoint, which could remotely re-prompt fork users.
+  if (!nudgeUrl) {
+    return null
+  }
+
+  try {
+    const res = await net.fetch(nudgeUrl, {
+      signal: AbortSignal.timeout(5000)
+    })
+    if (!res.ok) {
+      return null
+    }
+
+    const json: unknown = await res.json()
+    if (!json || typeof json !== 'object' || Array.isArray(json)) {
+      return null
+    }
+
+    const { id, minVersion, maxVersion } = json as Record<string, unknown>
+    if (typeof id !== 'string' || !id.trim()) {
+      return null
+    }
+
+    if (minVersion === undefined && maxVersion === undefined) {
+      return null
+    }
+
+    if (minVersion !== undefined && typeof minVersion !== 'string') {
+      return null
+    }
+    if (maxVersion !== undefined && typeof maxVersion !== 'string') {
+      return null
+    }
+    if (minVersion !== undefined && !isValidVersion(minVersion)) {
+      return null
+    }
+    if (maxVersion !== undefined && !isValidVersion(maxVersion)) {
+      return null
+    }
+    if (
+      minVersion !== undefined &&
+      maxVersion !== undefined &&
+      compareVersions(minVersion, maxVersion) > 0
+    ) {
+      return null
+    }
+
+    return {
+      id: id.trim(),
+      minVersion,
+      maxVersion
+    }
+  } catch {
+    return null
+  }
+}
+
+export function versionMatchesRange(
+  appVersion: string,
+  range: { minVersion?: string; maxVersion?: string }
+): boolean {
+  if (range.minVersion !== undefined && compareVersions(appVersion, range.minVersion) < 0) {
+    return false
+  }
+  if (range.maxVersion !== undefined && compareVersions(appVersion, range.maxVersion) > 0) {
+    return false
+  }
+  return true
+}
+
+export function shouldApplyNudge(args: {
+  nudge: NudgeConfig
+  appVersion: string
+  pendingUpdateNudgeId: string | null
+  dismissedUpdateNudgeId: string | null
+}): boolean {
+  const { nudge, appVersion, pendingUpdateNudgeId, dismissedUpdateNudgeId } = args
+
+  if (nudge.id === pendingUpdateNudgeId || nudge.id === dismissedUpdateNudgeId) {
+    return false
+  }
+
+  return versionMatchesRange(appVersion, nudge)
+}

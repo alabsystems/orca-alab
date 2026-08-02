@@ -1,0 +1,145 @@
+{
+  "module": "feature-wall-tour-depth",
+  "source": "src/shared/feature-wall-tour-depth.ts",
+  "rustCrate": "orca-core::feature_wall_tour_depth",
+  "cases": [
+    {
+      "function": "getFeatureWallTourDepthStep",
+      "note": "Start defaults to the terminal-first screen",
+      "input": { "workflowId": "start" },
+      "expected": "terminal"
+    },
+    {
+      "function": "getFeatureWallTourDepthStep",
+      "note": "A selected lifecycle step maps directly to depth",
+      "input": { "workflowId": "plan", "stepId": "workspaces" },
+      "expected": "workspaces"
+    },
+    {
+      "function": "getFeatureWallTourDepthStep",
+      "note": "Scale defaults to the agent control-plane screen",
+      "input": { "workflowId": "scale" },
+      "expected": "cli-skills"
+    },
+    {
+      "function": "getFeatureWallTourDepthStep",
+      "note": "Computer Use is the final Anywhere step",
+      "input": { "workflowId": "anywhere", "stepId": "computer-use" },
+      "expected": "computer-use"
+    },
+    {
+      "function": "buildFeatureWallTourDepthSummary",
+      "note": "Session-local counts and furthest step use generic lifecycle sets",
+      "input": {
+        "visitedWorkflows": ["start", "plan", "build"],
+        "visitedSteps": ["terminal", "add-project", "tasks", "workspaces", "agents"],
+        "workflowDone": {
+          "start": true,
+          "plan": true,
+          "build": false,
+          "ship": false,
+          "scale": false,
+          "anywhere": false
+        },
+        "stepDone": {
+          "terminal": true,
+          "add-project": true,
+          "tasks": true,
+          "workspaces": true,
+          "agents": true,
+          "workbench": false,
+          "browser-design": false,
+          "review-ship": false,
+          "cli-skills": false,
+          "orchestration": false,
+          "automations": false,
+          "remote-mobile": false,
+          "mobile-emulators": false,
+          "computer-use": false
+        },
+        "lastGroupId": "build"
+      },
+      "expected": {
+        "furthest_step": "agents",
+        "last_group_id": "build",
+        "visited_workflow_count": 3,
+        "visited_substep_count": 5,
+        "completed_workflow_count": 2,
+        "completed_substep_count": 5
+      }
+    },
+    {
+      "function": "buildFeatureWallTourDepthSummary",
+      "note": "Empty sets omit optional depth keys",
+      "input": {
+        "visitedWorkflows": [],
+        "visitedSteps": [],
+        "workflowDone": {},
+        "stepDone": {},
+        "lastGroupId": null
+      },
+      "expected": {
+        "visited_workflow_count": 0,
+        "visited_substep_count": 0,
+        "completed_workflow_count": 0,
+        "completed_substep_count": 0
+      }
+    },
+    {
+      "function": "buildFeatureWallTourDepthSummary",
+      "note": "All screens visited reaches Computer Use",
+      "input": {
+        "visitedWorkflows": ["start", "plan", "build", "ship", "scale", "anywhere"],
+        "visitedSteps": [
+          "terminal",
+          "add-project",
+          "tasks",
+          "workspaces",
+          "agents",
+          "workbench",
+          "browser-design",
+          "review-ship",
+          "cli-skills",
+          "orchestration",
+          "automations",
+          "remote-mobile",
+          "mobile-emulators",
+          "computer-use"
+        ],
+        "workflowDone": {
+          "start": true,
+          "plan": true,
+          "build": true,
+          "ship": true,
+          "scale": true,
+          "anywhere": true
+        },
+        "stepDone": {
+          "terminal": true,
+          "add-project": true,
+          "tasks": true,
+          "workspaces": true,
+          "agents": true,
+          "workbench": true,
+          "browser-design": true,
+          "review-ship": true,
+          "cli-skills": true,
+          "orchestration": true,
+          "automations": true,
+          "remote-mobile": true,
+          "mobile-emulators": true,
+          "computer-use": true
+        },
+        "lastGroupId": "anywhere"
+      },
+      "expected": {
+        "furthest_step": "computer-use",
+        "last_group_id": "anywhere",
+        "visited_workflow_count": 6,
+        "visited_substep_count": 14,
+        "completed_workflow_count": 6,
+        "completed_substep_count": 14
+      }
+    }
+  ]
+}

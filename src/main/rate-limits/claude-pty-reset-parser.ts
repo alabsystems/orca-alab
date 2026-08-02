@@ -1,0 +1,254 @@
+import type { RateLimitWindow } from '../../shared/rate-limit-types'
+import {
+  buildRollingResetTimestamp,
+  getZonedNowParts,
+  MONTH_INDEX_BY_NAME,
+  shiftCalendarDays,
+  WEEKDAY_INDEX_BY_NAME
+} from './reset-time-zone-calendar'
+
+const RESET_LINE_RE = /resets?\s+(?:at\s+|in\s+)?(.+)/i
+const MONTH_PATTERN =
+  'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?'
+const MONTH_DAY_COMPACT_RE = new RegExp(
+  `\\b(${MONTH_PATTERN})(\\d{1,2})(?=\\s*at\\s*\\d|\\D|$)`,
+  'i'
+)
+const MONTH_DAY_TIME_RE = new RegExp(
+  `\\b(${MONTH_PATTERN})\\.?\\s+(\\d{1,2})(?:,?\\s*(?:at\\s+)?)?(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)\\b`,
+  'i'
+)
+const WEEKDAY_TIME_RE =
+  /\b(sun(?:day)?|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)\.?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i
+const TIME_ONLY_RE = /\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i
+// Why: newer Codex CLIs print 24-hour reset times ("10:21 on 28 Jul") with no am/pm.
+const TIME_24H_RE = /\b(\d{1,2}):(\d{2})\b/
+const DAY_MONTH_RE = new RegExp(`\\b(?:on\\s+)?(\\d{1,2})\\s+(${MONTH_PATTERN})\\b`, 'i')
+const RELATIVE_RESET_RE = /^(?:\s*\d+\s*(?:d(?:ays?)?|h(?:ours?|rs?)?|m(?:in(?:ute)?s?)?)\s*)+$/i
+const RELATIVE_RESET_TOKEN_RE = /(\d+)\s*(d(?:ays?)?|h(?:ours?|rs?)?|m(?:in(?:ute)?s?)?)/gi
+const IANA_TIME_ZONE_RE = /\(([^()]*)\)?\s*$/
+
+export type ClaudePtyResetMetadata = Pick<RateLimitWindow, 'resetsAt' | 'resetDescription'>
+
+export function extractClaudePtyResetMetadata(
+  lines: string[],
+  matchesLabel: (line: string) => boolean,
+  isSectionLabel: (line: string) => boolean
+): ClaudePtyResetMetadata {
+  for (let i = 0; i < lines.length; i++) {
+    if (!matchesLabel(lines[i])) {
+      continue
+    }
+    for (let j = i; j < Math.min(i + 14, lines.length); j++) {
+      if (j > i && isSectionLabel(lines[j])) {
+        break
+      }
+      const m = RESET_LINE_RE.exec(lines[j])
+      if (m) {
+        const resetDescription = normalizeResetDescription(m[1])
+        return {
+          resetsAt: parseResetTimestamp(resetDescription),
+          resetDescription
+        }
+      }
+    }
+  }
+  return { resetsAt: null, resetDescription: null }
+}
+
+function normalizeResetDescription(raw: string): string {
+  // Why: Claude's TUI occasionally drops spaces around the Fable reset date
+  // when copied from the PTY buffer, but the value still encodes a real reset.
+  return (
+    raw
+      .trim()
+      // Why: PTY captures keep trailing box-border glyphs from framed status panels.
+      .replace(/[)\s│]+$/, '')
+      .replace(/\s+/g, ' ')
+      .replace(MONTH_DAY_COMPACT_RE, '$1 $2')
+      .replace(/(\d{1,2})\s*at\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))/i, '$1 at $2')
+      .replace(/(\d)(am|pm)\(/gi, '$1$2 (')
+  )
+}
+
+function parseResetTimestamp(resetDescription: string | null): number | null {
+  if (!resetDescription) {
+    return null
+  }
+
+  return (
+    parseRelativeResetTimestamp(resetDescription) ??
+    parseMonthDayResetTimestamp(resetDescription) ??
+    parseWeekdayResetTimestamp(resetDescription) ??
+    parseTimeOnlyResetTimestamp(resetDescription) ??
+    parseTwentyFourHourResetTimestamp(resetDescription)
+  )
+}
+
+function parseTwentyFourHourResetTimestamp(resetDescription: string): number | null {
+  const resetText = stripResetTimeZone(resetDescription)
+  const timeMatch = TIME_24H_RE.exec(resetText)
+  if (!timeMatch) {
+    return null
+  }
+  const hour = Number(timeMatch[1])
+  const minute = Number(timeMatch[2])
+  if (!isValidClockTime(hour, minute)) {
+    return null
+  }
+
+  const timeZone = extractResetTimeZone(resetDescription)
+  const zonedNow = getZonedNowParts(timeZone)
+
+  const dayMonthMatch = DAY_MONTH_RE.exec(resetText)
+  if (dayMonthMatch) {
+    const day = Number(dayMonthMatch[1])
+    const monthIndex = MONTH_INDEX_BY_NAME[dayMonthMatch[2].toLowerCase()]
+    if (monthIndex === undefined || day < 1 || day > 31) {
+      return null
+    }
+    return buildRollingResetTimestamp(
+      { year: zonedNow.year, monthIndex, day, hour, minute },
+      timeZone,
+      (parts) => ({ ...parts, year: parts.year + 1 })
+    )
+  }
+
+  return buildRollingResetTimestamp({ ...zonedNow, hour, minute }, timeZone, (parts) =>
+    shiftCalendarDays(parts, 1)
+  )
+}
+
+function parseRelativeResetTimestamp(resetDescription: string): number | null {
+  if (!RELATIVE_RESET_RE.test(resetDescription)) {
+    return null
+  }
+
+  let durationMs = 0
+  for (const match of resetDescription.matchAll(RELATIVE_RESET_TOKEN_RE)) {
+    const amount = Number(match[1])
+    const unit = match[2].toLowerCase()[0]
+    if (!Number.isFinite(amount)) {
+      continue
+    }
+    if (unit === 'd') {
+      durationMs += amount * 24 * 60 * 60_000
+    } else if (unit === 'h') {
+      durationMs += amount * 60 * 60_000
+    } else if (unit === 'm') {
+      durationMs += amount * 60_000
+    }
+  }
+  return durationMs > 0 ? Date.now() + durationMs : null
+}
+
+function parseMonthDayResetTimestamp(resetDescription: string): number | null {
+  const resetText = stripResetTimeZone(resetDescription)
+  const match = MONTH_DAY_TIME_RE.exec(resetText)
+  if (!match) {
+    return null
+  }
+
+  const monthIndex = MONTH_INDEX_BY_NAME[match[1].toLowerCase()]
+  if (monthIndex === undefined) {
+    return null
+  }
+
+  const day = Number(match[2])
+  const hour = parseHour(match[3], match[5])
+  const minute = Number(match[4] ?? 0)
+  if (!isValidClockTime(hour, minute)) {
+    return null
+  }
+
+  const timeZone = extractResetTimeZone(resetDescription)
+  const year = getZonedNowParts(timeZone).year
+  return buildRollingResetTimestamp({ year, monthIndex, day, hour, minute }, timeZone, (parts) => ({
+    ...parts,
+    year: parts.year + 1
+  }))
+}
+
+function parseWeekdayResetTimestamp(resetDescription: string): number | null {
+  const resetText = stripResetTimeZone(resetDescription)
+  const match = WEEKDAY_TIME_RE.exec(resetText)
+  if (!match) {
+    return null
+  }
+
+  const weekdayIndex = WEEKDAY_INDEX_BY_NAME[match[1].toLowerCase()]
+  if (weekdayIndex === undefined) {
+    return null
+  }
+
+  const hour = parseHour(match[2], match[4])
+  const minute = Number(match[3] ?? 0)
+  if (!isValidClockTime(hour, minute)) {
+    return null
+  }
+
+  // Why: the reset weekday is expressed in the reset line's zone (or local when
+  // none), so derive "today" and the day-of-week from that zone before rolling
+  // forward — mirroring the month-day branch instead of assuming local time.
+  const timeZone = extractResetTimeZone(resetDescription)
+  const zonedNow = getZonedNowParts(timeZone)
+  const daysUntil = (weekdayIndex - zonedNow.weekday + 7) % 7
+  const target = shiftCalendarDays(zonedNow, daysUntil)
+  return buildRollingResetTimestamp({ ...target, hour, minute }, timeZone, (parts) =>
+    shiftCalendarDays(parts, 7)
+  )
+}
+
+function parseTimeOnlyResetTimestamp(resetDescription: string): number | null {
+  const resetText = stripResetTimeZone(resetDescription)
+  const match = TIME_ONLY_RE.exec(resetText)
+  if (!match) {
+    return null
+  }
+
+  const hour = parseHour(match[1], match[3])
+  const minute = Number(match[2] ?? 0)
+  if (!isValidClockTime(hour, minute)) {
+    return null
+  }
+
+  const timeZone = extractResetTimeZone(resetDescription)
+  const zonedNow = getZonedNowParts(timeZone)
+  return buildRollingResetTimestamp({ ...zonedNow, hour, minute }, timeZone, (parts) =>
+    shiftCalendarDays(parts, 1)
+  )
+}
+
+function parseHour(hourText: string, periodText: string): number {
+  const hour = Number(hourText)
+  const period = periodText.toLowerCase()
+  if (hour < 1 || hour > 12) {
+    return Number.NaN
+  }
+  if (period === 'am') {
+    return hour === 12 ? 0 : hour
+  }
+  return hour === 12 ? 12 : hour + 12
+}
+
+function isValidClockTime(hour: number, minute: number): boolean {
+  return Number.isInteger(hour) && hour >= 0 && hour < 24 && minute >= 0 && minute < 60
+}
+
+function stripResetTimeZone(resetDescription: string): string {
+  return resetDescription.replace(/\s*\([^)]*\)?\s*$/, '').trim()
+}
+
+function extractResetTimeZone(resetDescription: string): string | null {
+  const match = IANA_TIME_ZONE_RE.exec(resetDescription)
+  if (!match?.[1]) {
+    return null
+  }
+  const timeZone = match[1].trim()
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone })
+    return timeZone
+  } catch {
+    return null
+  }
+}

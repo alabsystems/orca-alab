@@ -1,0 +1,351 @@
+// The daemon parity corpus: a single stateful RPC sequence driven over the real
+// socket against BOTH daemons. Each step projects the raw RpcResponse into a
+// volatile-free STRUCTURAL fingerprint — the contract the Rust and Node daemons
+// must agree on. Engine-rendered fields (snapshotAnsi bytes, exact pid,
+// createdAt) are NOT byte-compared: the two daemons render through different VT
+// engines (aterm vs @xterm/headless), so those legitimately differ and are
+// reduced to semantic tags (has-marker, is-number). This gate proves
+// wire-protocol + behavioral parity, not engine-render equality (that is the
+// aterm conformance gauntlet's job).
+
+const SID = 's-parity-1'
+const CWD = '/tmp/dparity'
+const MARKER = 'MARKER_PARITY_XYZ'
+// OSC-7 sets the engine's cwd to CWD; the marker lands on the rendered grid.
+const DRIVE_LINE = `printf '\\033]7;file://${CWD}\\007${MARKER}\\n'\n`
+
+const typeTag = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v)
+
+async function waitFor(pred, { tries = 100, delayMs = 25 } = {}) {
+  for (let i = 0; i < tries; i++) {
+    if (await pred()) {
+      return true
+    }
+    await new Promise((r) => setTimeout(r, delayMs))
+  }
+  return false
+}
+
+// Drive the full sequence against a connected DaemonSocketClient and return an
+// ordered list of {step, projection} fingerprints plus a couple of semantic
+// facts collected across steps.
+export async function driveDaemon(client) {
+  const steps = []
+  const record = (step, projection) => steps.push({ step, projection })
+
+  // 1. Liveness.
+  const ping = await client.rpc('ping')
+  record('ping', { ok: ping.ok, pong: ping.payload?.pong ?? null })
+
+  // 2. Create a fresh session.
+  const created = await client.rpc('createOrAttach', {
+    sessionId: SID,
+    cols: 88,
+    rows: 26
+  })
+  record('createOrAttach:new', {
+    ok: created.ok,
+    isNew: created.payload?.isNew ?? null,
+    pidType: typeTag(created.payload?.pid),
+    hasSnapshot: (created.payload?.snapshot ?? null) !== null,
+    shellStateType: typeTag(created.payload?.shellState),
+    // No historySeed was sent, so BOTH daemons must OMIT `historySeeded` (undefined),
+    // not emit false — the client keys off === true / === false.
+    historySeededAbsent: !('historySeeded' in (created.payload ?? {}))
+  })
+
+  // 2b. A createOrAttach carrying a `historySeed` (the adapter's unclean-shutdown
+  //     cold-restore path) must reseed the fresh engine and report
+  //     historySeeded:true, so the client re-anchors checkpointing (canReanchorHistory)
+  //     instead of suspending it — and a later getSnapshot serializes the recovered
+  //     history. Both daemons must agree on the wire field. The marker is seeded above
+  //     the fold (30 trailing newlines) so it deterministically lands in scrollback,
+  //     independent of the live shell's startup output or the daemon's VT engine.
+  const SID_SEED = 's-parity-seed'
+  const SEED = `${MARKER}\r\n${'\r\n'.repeat(30)}`
+  const seeded = await client.rpc('createOrAttach', {
+    sessionId: SID_SEED,
+    cols: 80,
+    rows: 24,
+    historySeed: SEED
+  })
+  const seededSnap = await client.rpc('getSnapshot', { sessionId: SID_SEED })
+  record('createOrAttach:historySeed', {
+    ok: seeded.ok,
+    isNew: seeded.payload?.isNew ?? null,
+    historySeeded: seeded.payload?.historySeeded ?? null,
+    seedInScrollback:
+      typeof seededSnap.payload?.snapshot?.scrollbackAnsi === 'string' &&
+      seededSnap.payload.snapshot.scrollbackAnsi.includes(MARKER)
+  })
+  await client.rpc('kill', { sessionId: SID_SEED })
+
+  // 3. Drive the shell: OSC-7 cwd + a marker, both parsed by the engine.
+  const write1 = await client.rpc('write', { sessionId: SID, data: DRIVE_LINE })
+  record('write:drive', { ok: write1.ok })
+
+  // 4. getCwd reflects the OSC-7 once the engine parses it — a real readiness
+  //    signal (stronger than echoed command text).
+  let lastCwd = null
+  const cwdReady = await waitFor(async () => {
+    const r = await client.rpc('getCwd', { sessionId: SID })
+    lastCwd = r.payload?.cwd ?? null
+    return r.payload?.cwd === CWD
+  })
+  record('getCwd', { ok: cwdReady, cwd: lastCwd })
+
+  // 5. Snapshot: dims exact, cwd exact, marker present (rendered), modes shape.
+  const snap = await client.rpc('getSnapshot', { sessionId: SID })
+  const s = snap.payload?.snapshot ?? null
+  record('getSnapshot', {
+    ok: snap.ok,
+    hasSnapshot: s !== null,
+    cols: s?.cols ?? null,
+    rows: s?.rows ?? null,
+    cwd: s?.cwd ?? null,
+    snapshotHasMarker: typeof s?.snapshotAnsi === 'string' && s.snapshotAnsi.includes(MARKER),
+    modeKeys: s?.modes ? Object.keys(s.modes).sort() : null
+  })
+
+  // 6. Size mirrors the created grid. Wire shape: payload.size.{cols,rows}.
+  const size = await client.rpc('getSize', { sessionId: SID })
+  record('getSize', {
+    ok: size.ok,
+    cols: size.payload?.size?.cols ?? null,
+    rows: size.payload?.size?.rows ?? null
+  })
+
+  // 7. listSessions shows the live session with the right shape.
+  const list = await client.rpc('listSessions')
+  const info = (list.payload?.sessions ?? []).find((x) => x.sessionId === SID) ?? null
+  record('listSessions', {
+    ok: list.ok,
+    found: info !== null,
+    isAlive: info?.isAlive ?? null,
+    pidType: typeTag(info?.pid),
+    cols: info?.cols ?? null,
+    rows: info?.rows ?? null,
+    stateType: typeTag(info?.state)
+  })
+
+  // 8. Live output streamed to the stream socket carries the marker.
+  const streamHasMarker = client.streamData(SID).includes(MARKER)
+  record('streamData', { hasMarker: streamHasMarker })
+
+  // 9. Reattach on the live id → isNew:false (idempotency).
+  const reattach = await client.rpc('createOrAttach', {
+    sessionId: SID,
+    cols: 88,
+    rows: 26
+  })
+  record('createOrAttach:reattach', { ok: reattach.ok, isNew: reattach.payload?.isNew ?? null })
+
+  // 10. Resize is honored by the engine + reported by getSize.
+  const resize = await client.rpc('resize', { sessionId: SID, cols: 100, rows: 30 })
+  const sizeAfter = await client.rpc('getSize', { sessionId: SID })
+  record('resize', {
+    ok: resize.ok,
+    cols: sizeAfter.payload?.size?.cols ?? null,
+    rows: sizeAfter.payload?.size?.rows ?? null
+  })
+
+  // 11. clearScrollback succeeds.
+  const clear = await client.rpc('clearScrollback', { sessionId: SID })
+  record('clearScrollback', { ok: clear.ok })
+
+  // 11b. takePendingOutput drains the incremental checkpoint batch: a typed records
+  //      array + monotonic seq + overflow flag, snapshot null. Both daemons must
+  //      agree on this shape — it feeds the client's crash-restore history log.
+  const take = await client.rpc('takePendingOutput', { sessionId: SID })
+  record('takePendingOutput', {
+    ok: take.ok,
+    recordsType: typeTag(take.payload?.records),
+    seqType: typeTag(take.payload?.seq),
+    overflowedType: typeTag(take.payload?.overflowed),
+    snapshotIsNull: (take.payload?.snapshot ?? null) === null
+  })
+
+  // 11c. With includeSnapshot the full snapshot SUPERSEDES the increment log — an
+  //      EMPTY records array plus a snapshot object (the cold-restore checkpoint).
+  const takeSnap = await client.rpc('takePendingOutput', {
+    sessionId: SID,
+    includeSnapshot: true
+  })
+  record('takePendingOutput:snapshot', {
+    ok: takeSnap.ok,
+    recordsType: typeTag(takeSnap.payload?.records),
+    recordsEmpty: Array.isArray(takeSnap.payload?.records) && takeSnap.payload.records.length === 0,
+    hasSnapshot: (takeSnap.payload?.snapshot ?? null) !== null
+  })
+
+  // 12. Error cases: unknown-session write + snapshot must both fail cleanly.
+  const badWrite = await client.rpc('write', { sessionId: 'nope', data: 'x' })
+  record('write:unknown', { ok: badWrite.ok, errorType: typeTag(badWrite.error) })
+  // Unknown-session getSnapshot is graceful in the reference daemon: ok:true
+  // with snapshot=null (not an error), so both daemons must agree on that.
+  const badSnap = await client.rpc('getSnapshot', { sessionId: 'nope' })
+  record('getSnapshot:unknown', {
+    ok: badSnap.ok,
+    snapshotIsNull: (badSnap.payload?.snapshot ?? null) === null
+  })
+  // takePendingOutput on a missing/just-reaped session is null-not-throw in BOTH
+  // daemons (ok:true, payload null) — the client's checkpoint loop treats null as
+  // "done". A regression to an error here would spuriously fail checkpoints.
+  const badTake = await client.rpc('takePendingOutput', { sessionId: 'nope' })
+  record('takePendingOutput:unknown', {
+    ok: badTake.ok,
+    payloadIsNull: (badTake.payload ?? null) === null
+  })
+
+  // 13. Kill ends the session; an exit event should reach the stream and the
+  //     session should stop reporting alive.
+  const kill = await client.rpc('kill', { sessionId: SID })
+  const exited = await waitFor(async () => {
+    const r = await client.rpc('listSessions')
+    const i = (r.payload?.sessions ?? []).find((x) => x.sessionId === SID)
+    return !i || i.isAlive === false
+  })
+  const sawExit = client.events().some((e) => e.event === 'exit' && e.sessionId === SID)
+  record('kill', { ok: kill.ok, noLongerAlive: exited, sawExitEvent: sawExit })
+
+  // 14. Daemon still healthy after the session's lifecycle.
+  const ping2 = await client.rpc('ping')
+  record('ping:after', { ok: ping2.ok, pong: ping2.payload?.pong ?? null })
+
+  return { steps }
+}
+
+// Phase 2 — the daemon's raison d'être: a session SURVIVES full client
+// disconnect (both sockets), and a later reattach (same clientId, as after an
+// app reload) finds it live with its engine state intact. `connectClient` is a
+// factory `(clientId) => Promise<connected DaemonSocketClient>` so this can drop
+// and re-open sockets against the same running daemon.
+const SID2 = 's-parity-2'
+const MARKER2 = 'MARKER_SURVIVES_RELOAD'
+
+export async function driveDetachReattach(connectClient) {
+  const steps = []
+  const record = (step, projection) => steps.push({ step, projection })
+  const CLIENT = 'parity-reload-client'
+
+  // First attachment: create a session and print a durable marker.
+  const c1 = await connectClient(CLIENT)
+  const created = await c1.rpc('createOrAttach', { sessionId: SID2, cols: 80, rows: 24 })
+  record('reload:create', { ok: created.ok, isNew: created.payload?.isNew ?? null })
+  await c1.rpc('write', { sessionId: SID2, data: `printf '${MARKER2}\\n'\n` })
+  const marked = await waitFor(async () => {
+    const r = await c1.rpc('getSnapshot', { sessionId: SID2 })
+    return (r.payload?.snapshot?.snapshotAnsi ?? '').includes(MARKER2)
+  })
+  record('reload:marked', { ok: marked })
+
+  // Full disconnect — both sockets close, as when the renderer/window goes away.
+  c1.close()
+  await new Promise((r) => setTimeout(r, 150))
+
+  // Reattach with the SAME clientId (the reload path).
+  const c2 = await connectClient(CLIENT)
+  const reattach = await c2.rpc('createOrAttach', { sessionId: SID2, cols: 80, rows: 24 })
+  record('reload:reattach', {
+    ok: reattach.ok,
+    // The session must still be there → isNew:false, not a fresh spawn.
+    isNew: reattach.payload?.isNew ?? null
+  })
+
+  // The engine state (the marker) survived the disconnect.
+  const snap = await c2.rpc('getSnapshot', { sessionId: SID2 })
+  record('reload:snapshotSurvived', {
+    ok: snap.ok,
+    hasMarker: (snap.payload?.snapshot?.snapshotAnsi ?? '').includes(MARKER2)
+  })
+
+  // listSessions (from the new client) still reports it alive.
+  const list = await c2.rpc('listSessions')
+  const info = (list.payload?.sessions ?? []).find((x) => x.sessionId === SID2) ?? null
+  record('reload:stillListed', { found: info !== null, isAlive: info?.isAlive ?? null })
+
+  await c2.rpc('kill', { sessionId: SID2 })
+  c2.close()
+  return { steps }
+}
+
+// Phase 3 — the v1019 read-only SUBSCRIBER role, RUST LEG ONLY: the Node daemon
+// has no subscriber role (a fork-daemon feature), so these steps are NOT part of
+// the structural diff — they are asserted as Rust invariants. This covers the
+// socket path the in-process cargo tests (tests/subscriber_role.rs) bypass:
+// hydration + fan-out through a real second client's stream socket, the typed
+// write/resize denial, and follower-detach isolation. The shared corpus above
+// still runs at protocol 1018 on both legs (the back-compat proof); this phase
+// connects at 1019.
+const SID3 = 's-parity-3'
+const MARKER_SUB_PRE = 'MARKER_SUB_PRE'
+const MARKER_SUB_LIVE = 'MARKER_SUB_LIVE'
+const MARKER_SUB_AFTER = 'MARKER_SUB_AFTER'
+
+export async function driveSubscriberRole(connectClient) {
+  const steps = []
+  const record = (step, projection) => steps.push({ step, projection })
+
+  // Owner creates the session and renders a pre-subscribe marker.
+  const owner = await connectClient('parity-sub-owner')
+  const created = await owner.rpc('createOrAttach', { sessionId: SID3, cols: 80, rows: 24 })
+  record('subscriber:create', { ok: created.ok, isNew: created.payload?.isNew ?? null })
+  await owner.rpc('write', { sessionId: SID3, data: `printf '${MARKER_SUB_PRE}\\n'\n` })
+  await waitFor(async () => {
+    const r = await owner.rpc('getSnapshot', { sessionId: SID3 })
+    return (r.payload?.snapshot?.snapshotAnsi ?? '').includes(MARKER_SUB_PRE)
+  })
+
+  // A second client subscribes: hydration snapshot, no ownership rebind.
+  const follower = await connectClient('parity-sub-follower')
+  const sub = await follower.rpc('subscribe', { sessionId: SID3 })
+  record('subscriber:hydration', {
+    ok: sub.ok,
+    snapshotHasMarker: (sub.payload?.snapshot?.snapshotAnsi ?? '').includes(MARKER_SUB_PRE),
+    pidType: typeTag(sub.payload?.pid),
+    shellStateType: typeTag(sub.payload?.shellState)
+  })
+
+  // Live output fans out to BOTH stream sockets — the owner keeps its stream
+  // (the createOrAttach steal must not happen here).
+  await owner.rpc('write', { sessionId: SID3, data: `printf '${MARKER_SUB_LIVE}\\n'\n` })
+  const bothReceive = await waitFor(
+    () =>
+      follower.streamData(SID3).includes(MARKER_SUB_LIVE) &&
+      owner.streamData(SID3).includes(MARKER_SUB_LIVE)
+  )
+  record('subscriber:fanout', {
+    bothReceive,
+    ownerStillReceives: owner.streamData(SID3).includes(MARKER_SUB_LIVE),
+    followerReceives: follower.streamData(SID3).includes(MARKER_SUB_LIVE)
+  })
+
+  // Read-only authority: write and resize are rejected with the typed
+  // subscriber-read-only error, and the grid stays pinned to the owner's dims.
+  const deniedWrite = await follower.rpc('write', { sessionId: SID3, data: 'echo NOPE\n' })
+  const deniedResize = await follower.rpc('resize', { sessionId: SID3, cols: 132, rows: 43 })
+  const size = await owner.rpc('getSize', { sessionId: SID3 })
+  record('subscriber:readOnly', {
+    writeDenied:
+      deniedWrite.ok === false && `${deniedWrite.error}`.startsWith('subscriber-read-only'),
+    resizeDenied:
+      deniedResize.ok === false && `${deniedResize.error}`.startsWith('subscriber-read-only'),
+    gridPinned: size.payload?.size?.cols === 80 && size.payload?.size?.rows === 24
+  })
+
+  // Follower disconnect (both sockets): the owner keeps streaming and the
+  // session stays alive — a dropped mirror never touches the owner.
+  follower.close()
+  await new Promise((r) => setTimeout(r, 150))
+  await owner.rpc('write', { sessionId: SID3, data: `printf '${MARKER_SUB_AFTER}\\n'\n` })
+  const ownerStillStreams = await waitFor(() => owner.streamData(SID3).includes(MARKER_SUB_AFTER))
+  const list = await owner.rpc('listSessions')
+  const info = (list.payload?.sessions ?? []).find((x) => x.sessionId === SID3) ?? null
+  record('subscriber:detachHarmless', { ownerStillStreams, stillAlive: info?.isAlive ?? null })
+
+  await owner.rpc('kill', { sessionId: SID3 })
+  owner.close()
+  return { steps }
+}
+
+export const parityConstants = { SID, SID2, CWD, MARKER, MARKER2 }

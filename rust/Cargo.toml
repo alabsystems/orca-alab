@@ -1,0 +1,84 @@
+# Orca native Rust workspace.
+#
+# Target architecture (see docs/rust-migration/architecture.md):
+#   - orca-core      : pure cross-cutting logic ported from src/shared (no IO)
+#   - orca-terminal  : headless terminal emulation via vendored alacritty_terminal
+#   - orca-git, orca-scm, orca-runtime, ... : IO/service tiers (added per migration phase)
+#   - thin Swift/SwiftUI shell on macOS links the core over a C ABI / UniFFI
+#
+# All third-party dependencies are vendored under rust/vendor and stripped to
+# essential functionality; the workspace builds offline (see .cargo/config.toml
+# once vendoring is wired up).
+[workspace]
+resolver = "2"
+members = [
+    "crates/orca-agents",
+    "crates/orca-aterm-demo",
+    "crates/orca-config",
+    "crates/orca-core",
+    "crates/orca-crash-recovery",
+    "crates/orca-crypto",
+    "crates/orca-daemon",
+    "crates/orca-dispatch",
+    "crates/orca-ffi",
+    "crates/orca-flow-control",
+    "crates/orca-git",
+    "crates/orca-net",
+    "crates/orca-parity",
+    "crates/orca-provider-backoff",
+    "crates/orca-pty",
+    "crates/orca-relay",
+    "crates/orca-renderer-heap",
+    "crates/orca-runtime",
+    "crates/orca-session",
+    "crates/orca-session-gc",
+    "crates/orca-ssh",
+    "crates/orca-store",
+    "crates/orca-stream-split",
+    "crates/orca-terminal",
+    "crates/orca-text",
+    "crates/orca-winpipe",
+]
+# The vendored aterm engine under rust/aterm is its OWN workspace (path-dep'd by
+# orca-terminal). Exclude it so this workspace never tries to absorb its members.
+# orca-git-wasm is likewise its OWN workspace: it pulls wasm-bindgen (a web dep
+# that is NOT vendored) for the wasm32 target, so it must stay out of this
+# offline/vendored workspace's lock. Built from the repo root online.
+exclude = ["aterm", "orca-git-wasm"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.96"
+license = "MIT"
+repository = "https://github.com/alabsystems/orca-alab"
+
+[profile.release]
+# Native binaries ship stripped and LTO'd for size — the app replaces a
+# multi-hundred-MB Electron bundle, so size discipline is a primary goal.
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# The aterm terminal engine is on the hot path (parse PTY output -> grid), and
+# is tiny relative to the app. `opt-level="z"` cut its throughput materially:
+# measured interleaved, same corpus + thermal state, 2.5x on a balanced 16 MB
+# ANSI corpus (147 -> 374 MB/s) and 1.9x on text-heavy (292 -> 564), byte-
+# identical output. Build the engine crates for SPEED; the app stays size-opt.
+[profile.release.package.aterm-core]
+opt-level = 3
+[profile.release.package.aterm-grid]
+opt-level = 3
+[profile.release.package.aterm-parser]
+opt-level = 3
+[profile.release.package.aterm-scrollback]
+opt-level = 3
+[profile.release.package.aterm-grapheme]
+opt-level = 3
+[profile.release.package.aterm-vi]
+opt-level = 3
+[profile.release.package.aterm-selection]
+opt-level = 3
+[profile.release.package.aterm-search]
+opt-level = 3
