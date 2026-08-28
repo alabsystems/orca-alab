@@ -1,0 +1,225 @@
+// @vitest-environment happy-dom
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  createTerminalImeDeferredNewlineSender,
+  sendTerminalInputAfterComposition,
+  TERMINAL_IME_DEFERRED_NEWLINE_FALLBACK_MS,
+  TERMINAL_IME_ENTER_REDISPATCH_ABSORB_WINDOW_MS
+} from './terminal-ime-deferred-newline'
+
+describe('sendTerminalInputAfterComposition', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('sends the newline one macrotask after compositionend so the glyph flushes first', () => {
+    const el = document.createElement('div')
+    const send = vi.fn()
+
+    sendTerminalInputAfterComposition(el, send)
+    expect(send).not.toHaveBeenCalled()
+
+    el.dispatchEvent(new Event('compositionend'))
+    // Deferred a macrotask so the engine's post-compositionend flush runs first.
+    expect(send).not.toHaveBeenCalled()
+
+    vi.runAllTimers()
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  it('falls back to sending when no compositionend arrives', () => {
+    const el = document.createElement('div')
+    const send = vi.fn()
+
+    sendTerminalInputAfterComposition(el, send)
+    vi.runAllTimers()
+
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  // #12871: a newline arriving late still arrives, so the fallback timer is right for it. A cursor
+  // chord arriving mid-preedit is the corruption the wait exists to prevent, and a conversion can
+  // hold its candidate window open for seconds — far past the fallback.
+  it('never fires on a timer when the caller opts out of the fallback', () => {
+    const el = document.createElement('div')
+    const send = vi.fn()
+
+    sendTerminalInputAfterComposition(el, send, { fallbackMs: null })
+    vi.advanceTimersByTime(60_000)
+    expect(send).not.toHaveBeenCalled()
+
+    el.dispatchEvent(new Event('compositionend'))
+    vi.runAllTimers()
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  // STA-4476: `fallbackMs: null` has no exit of its own, so the returned disposer is the only thing
+  // that can detach the listener when compositionend never arrives.
+  it('detaches its listener and never sends once disposed', () => {
+    const el = document.createElement('div')
+    const send = vi.fn()
+    const removeEventListener = vi.spyOn(el, 'removeEventListener')
+
+    const dispose = sendTerminalInputAfterComposition(el, send, { fallbackMs: null })
+    dispose()
+
+    expect(removeEventListener).toHaveBeenCalledWith('compositionend', expect.any(Function))
+
+    el.dispatchEvent(new Event('compositionend'))
+    vi.runAllTimers()
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  // STA-4476: why the Enter path needs no disposer of its own — its fallback always runs, so the
+  // listener cannot outlive it even when the composition never ends.
+  it('detaches its listener on the fallback, not only on compositionend', () => {
+    const el = document.createElement('div')
+    const removeEventListener = vi.spyOn(el, 'removeEventListener')
+
+    sendTerminalInputAfterComposition(el, vi.fn())
+    vi.advanceTimersByTime(TERMINAL_IME_DEFERRED_NEWLINE_FALLBACK_MS)
+
+    expect(removeEventListener).toHaveBeenCalledWith('compositionend', expect.any(Function))
+  })
+
+  it('sends only once and drops the listener after firing', () => {
+    const el = document.createElement('div')
+    const send = vi.fn()
+
+    sendTerminalInputAfterComposition(el, send)
+    el.dispatchEvent(new Event('compositionend'))
+    vi.runAllTimers()
+    expect(send).toHaveBeenCalledTimes(1)
+
+    // A later composition on the same terminal must not re-fire the stale newline.
+    el.dispatchEvent(new Event('compositionend'))
+    vi.runAllTimers()
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not double-send when compositionend arrives after the fallback fired', () => {
+    const el = document.createElement('div')
+    const send = vi.fn()
+
+    sendTerminalInputAfterComposition(el, send)
+    vi.runAllTimers()
+    expect(send).toHaveBeenCalledTimes(1)
+
+    el.dispatchEvent(new Event('compositionend'))
+    vi.runAllTimers()
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  it('still delivers the input on the next macrotask without a terminal element', () => {
+    const send = vi.fn()
+
+    sendTerminalInputAfterComposition(null, send)
+    expect(send).not.toHaveBeenCalled()
+
+    vi.runAllTimers()
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('createTerminalImeDeferredNewlineSender', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const createSender = () => createTerminalImeDeferredNewlineSender()
+
+  it('absorbs the re-dispatch while the deferred send is still in flight, exactly once', () => {
+    const el = document.createElement('div')
+    const send = vi.fn()
+    const sender = createSender()
+
+    sender.defer(1, el, send)
+    expect(sender.absorbRedispatchedEnter(1)).toBe(true)
+    expect(sender.absorbRedispatchedEnter(1)).toBe(false)
+
+    el.dispatchEvent(new Event('compositionend'))
+    vi.runAllTimers()
+    expect(send).toHaveBeenCalledTimes(1)
+    // The credit was consumed pre-send, so nothing lingers to eat a real Enter.
+    expect(sender.absorbRedispatchedEnter(1)).toBe(false)
+  })
+
+  it('absorbs the re-dispatch shortly after the deferred send fired', () => {
+    // Why: when the send's macrotask beats the re-dispatched keydown, the
+    // duplicate arrives a few ms after the newline went out.
+    const el = document.createElement('div')
+    const send = vi.fn()
+    const sender = createSender()
+
+    sender.defer(1, el, send)
+    el.dispatchEvent(new Event('compositionend'))
+    vi.runAllTimers()
+    expect(send).toHaveBeenCalledTimes(1)
+
+    vi.advanceTimersByTime(TERMINAL_IME_ENTER_REDISPATCH_ABSORB_WINDOW_MS)
+    expect(sender.absorbRedispatchedEnter(1)).toBe(true)
+    expect(sender.absorbRedispatchedEnter(1)).toBe(false)
+  })
+
+  it('expires the post-send absorb window so a later real Enter is never eaten', () => {
+    const el = document.createElement('div')
+    const sender = createSender()
+
+    sender.defer(1, el, vi.fn())
+    el.dispatchEvent(new Event('compositionend'))
+    vi.runAllTimers()
+
+    vi.advanceTimersByTime(TERMINAL_IME_ENTER_REDISPATCH_ABSORB_WINDOW_MS + 1)
+    expect(sender.absorbRedispatchedEnter(1)).toBe(false)
+  })
+
+  it('tracks panes independently', () => {
+    const el = document.createElement('div')
+    const sender = createSender()
+
+    sender.defer(1, el, vi.fn())
+    expect(sender.absorbRedispatchedEnter(2)).toBe(false)
+    expect(sender.absorbRedispatchedEnter(1)).toBe(true)
+  })
+
+  it('grants one credit per overlapping defer on the same pane', () => {
+    const el = document.createElement('div')
+    const sender = createSender()
+
+    sender.defer(1, el, vi.fn())
+    sender.defer(1, el, vi.fn())
+    expect(sender.absorbRedispatchedEnter(1)).toBe(true)
+    expect(sender.absorbRedispatchedEnter(1)).toBe(true)
+    expect(sender.absorbRedispatchedEnter(1)).toBe(false)
+  })
+
+  it('arms the absorb window on the fallback path too', () => {
+    const el = document.createElement('div')
+    const send = vi.fn()
+    const sender = createSender()
+
+    sender.defer(1, el, send)
+    vi.runAllTimers()
+    expect(send).toHaveBeenCalledTimes(1)
+
+    expect(sender.absorbRedispatchedEnter(1)).toBe(true)
+  })
+
+  it('still delivers without a terminal element and arms the absorb window', () => {
+    const send = vi.fn()
+    const sender = createSender()
+
+    sender.defer(1, null, send)
+    vi.runAllTimers()
+
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(sender.absorbRedispatchedEnter(1)).toBe(true)
+    expect(sender.absorbRedispatchedEnter(1)).toBe(false)
+  })
+})

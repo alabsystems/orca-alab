@@ -1,0 +1,311 @@
+import { test, expect } from './helpers/orca-app'
+import { waitForActivePanePtyId } from './helpers/terminal'
+import { waitForActiveAtermController } from './helpers/aterm-controller'
+import { waitForActiveWorktree, waitForSessionReady } from './helpers/store'
+import { writeFileSync } from 'node:fs'
+
+// Proves Phase 1 of the aterm in-page renderer: THEME, SCROLLBACK SCROLL, and
+// SELECTION+COPY for the aterm-rendered terminal pane (behind the experimental
+// flag). Drives the REAL Electron app: opens an aterm pane, asserts the canvas
+// background matches the seeded theme, then exercises wheel scroll and a mouse
+// drag → selection → clipboard via the AtermPaneController exposed on the pane.
+//
+// Note on headless geometry: ORCA_E2E_HEADLESS keeps the window hidden, so DOM
+// layout reports a 0x0 canvas rect (clientWidth/getBoundingClientRect == 0) even
+// though the device-pixel framebuffer is fully sized. Bulk output is fed through
+// the controller's process() (the exact path the PTY output mirror uses) so the
+// scroll assertion is deterministic, and synthetic drag coordinates are passed
+// canvas-relative (rect.left/top are 0) so they map to real grid cells.
+
+type AtermControllerProbe = {
+  process: (data: string) => void
+  displayOffset: () => number
+  scrollLines: (delta: number) => void
+  selectionText: () => string
+}
+
+// Resolve the pane under test BY PTY ID — the identity the test drives bytes
+// through. Positional lookups (manager iteration order / first-canvas
+// querySelector) surface the bootstrap "Terminal 1" pane, which on GPU-capable
+// hosts is a different, webgl2-owned canvas — injecting into or reading from it
+// is what made this spec non-deterministic.
+type PaneProbe = {
+  atermController?: AtermControllerProbe | null
+  container?: ({ dataset?: { ptyId?: string } } & Element) | null
+}
+
+function findPaneByPty(ptyId: string): PaneProbe {
+  const managers = (window as unknown as { __paneManagers?: Map<string, unknown> }).__paneManagers
+  for (const manager of managers?.values() ?? []) {
+    const m = manager as { getPanes?: () => PaneProbe[] }
+    for (const pane of m.getPanes?.() ?? []) {
+      if (pane?.container?.dataset?.ptyId === ptyId) {
+        return pane
+      }
+    }
+  }
+  throw new Error(`no pane for pty ${ptyId}`)
+}
+
+function findActiveController(ptyId: string): AtermControllerProbe {
+  const pane = findPaneByPty(ptyId)
+  if (!pane.atermController) {
+    throw new Error(`no aterm controller for pty ${ptyId}`)
+  }
+  return pane.atermController
+}
+
+function findActiveCanvas(ptyId: string): HTMLCanvasElement {
+  const c = findPaneByPty(ptyId).container?.querySelector('[data-testid="aterm-canvas"]')
+  if (!c) {
+    throw new Error(`no aterm canvas for pty ${ptyId}`)
+  }
+  return c as HTMLCanvasElement
+}
+
+test.describe('aterm in-page renderer (Phase 1)', () => {
+  test('theme, scrollback scroll, and selection+copy', async ({ orcaPage }) => {
+    await waitForSessionReady(orcaPage)
+    await waitForActiveWorktree(orcaPage)
+
+    // Force the CPU (2d) draw path for a deterministic headless getImageData read:
+    // a live GPU webgl2 swapchain is not reliably CPU-readable (an idle, damage-
+    // scheduled pane composites once then clears to transparent black). GPU theme
+    // parity is separately proven in aterm-webgl.spec.ts.
+    await orcaPage.evaluate(() => {
+      ;(window as unknown as { __atermGpuDisabled?: boolean }).__atermGpuDisabled = true
+    })
+    // Cursor glow (default-on) grants window-space chrome that pads the frame around
+    // the grid; this spec samples the bottom-right GRID cell's pixel, so pin glow off.
+    await orcaPage.evaluate(async () => {
+      await window.__store?.getState().updateSettings({ terminalEffectsCursorGlow: false })
+    })
+
+    await orcaPage.getByRole('button', { name: 'New tab' }).click()
+    await orcaPage
+      .getByRole('menuitem', { name: /New Terminal/i })
+      .first()
+      .click()
+
+    const canvas = orcaPage.locator('[data-testid="aterm-canvas"]').first()
+    await expect(canvas, 'aterm canvas should mount for the new pane').toBeAttached({
+      timeout: 20_000
+    })
+    const ptyId = await waitForActivePanePtyId(orcaPage)
+    // Wait for the async aterm controller (wasm/font/GPU load) so the in-page probe
+    // below finds it — under parallel e2e load it can attach after the PTY binds.
+    await waitForActiveAtermController(orcaPage)
+    // findPaneByPty/findActiveController/findActiveCanvas as ONE serialized source
+    // for the in-page probes (new Function can't resolve cross-function references).
+    const findersSrc = `${findPaneByPty.toString()}; return { findActiveController: ${findActiveController.toString()}, findActiveCanvas: ${findActiveCanvas.toString()} }`
+
+    // --- THEME ---------------------------------------------------------------
+    // Assert a true background cell MATCHES orca's CONFIGURED terminal theme bg,
+    // not merely "is dark". The expected bg is resolved INDEPENDENTLY in-page via
+    // window.__resolveAtermThemeBg — the same resolveEffectiveTerminalAppearance →
+    // composeActiveTerminalTheme pipeline the renderer seeds from, read fresh from
+    // the store — so this fails if the renderer painted a bg that does NOT match
+    // orca's configured theme (no reliance on the self-echoed data-aterm-bg).
+    // Sample bottom-right (an empty cell on a fresh pane; the top-left cell holds
+    // the block cursor, which would mask the bg).
+    // The grid canvas may be GPU-owned (webgl2) or CPU-owned (2d); read pixels via
+    // whichever (gl.readPixels / getImageData) through the shared helpers.
+    // Poll the probe itself until the PANE UNDER TEST has painted (opaque alpha at
+    // the sampled pixel — theme-agnostic paint detection) and the resolver exists.
+    type BgProbe = { pixel: number[]; expected: [number, number, number]; echoed?: number[] }
+    let bgProbe: BgProbe | null = null
+    await expect
+      .poll(
+        async () => {
+          bgProbe = await orcaPage.evaluate(
+            ({ findersSrc, ptyId }) => {
+              try {
+                // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
+                const finders = new Function(findersSrc)() as {
+                  findActiveCanvas: (id: string) => HTMLCanvasElement
+                }
+                const c = finders.findActiveCanvas(ptyId)
+                const resolve = (
+                  window as unknown as { __resolveAtermThemeBg?: () => [number, number, number] }
+                ).__resolveAtermThemeBg
+                const ctx = c.getContext('2d')
+                if (!resolve || !ctx || !c.width || !c.height) {
+                  return null
+                }
+                // Bottom-right pixel: an empty cell, free of the row-0/col-0 cursor
+                // block. Alpha < 255 = the drawer has not painted this frame yet.
+                const d = ctx.getImageData(c.width - 1, c.height - 1, 1, 1).data
+                if (d[3] !== 255) {
+                  return null
+                }
+                // Resolve the configured theme bg through the REAL pipeline,
+                // independently of whatever the renderer painted. Cross-check the
+                // self-echoed data-aterm-bg (NOT the assertion source) below.
+                const expected = resolve()
+                const raw = c.dataset.atermBg
+                const echoed = raw ? (raw.split(',').map((n) => Number(n)) as number[]) : undefined
+                return { pixel: [d[0], d[1], d[2]] as number[], expected, echoed }
+              } catch {
+                return null
+              }
+            },
+            { findersSrc, ptyId }
+          )
+          return bgProbe
+        },
+        {
+          timeout: 20_000,
+          message: 'the pane under test should paint its bg + expose the theme-bg resolver'
+        }
+      )
+      .not.toBeNull()
+    const bgPixel = bgProbe!.pixel
+    expect(bgPixel.every((v) => v >= 0 && v <= 255)).toBe(true)
+    expect(bgProbe!.expected, 'theme-bg resolver should return an RGB triplet').toBeTruthy()
+    const expectedBg = bgProbe!.expected
+    // An empty cell's background must MATCH the configured theme bg within a small
+    // tolerance (CPU rasterizer + any sub-pixel blend can nudge a channel a hair).
+    const TOLERANCE = 6
+    for (let ch = 0; ch < 3; ch++) {
+      expect(
+        Math.abs(bgPixel[ch] - expectedBg[ch]),
+        `bg pixel channel ${ch} (${bgPixel}) should match the configured theme bg (${expectedBg})`
+      ).toBeLessThanOrEqual(TOLERANCE)
+    }
+    // Cross-check (not the source of truth): the renderer's self-echoed seed
+    // should agree with the independently-resolved theme bg.
+    if (bgProbe!.echoed) {
+      for (let ch = 0; ch < 3; ch++) {
+        expect(
+          Math.abs(bgProbe!.echoed[ch] - expectedBg[ch]),
+          'the self-echoed seed should agree with the resolved theme bg'
+        ).toBeLessThanOrEqual(TOLERANCE)
+      }
+    }
+
+    // --- SCROLLBACK SCROLL ---------------------------------------------------
+    // Feed many lines through the controller (the PTY-output mirror's path), then
+    // dispatch a wheel-up over the canvas and assert the viewport scrolled into
+    // history (display offset > 0).
+    const offsetAfterWheel = await orcaPage.evaluate(
+      ({ findersSrc, ptyId }) => {
+        // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
+        const finders = new Function(findersSrc)() as {
+          findActiveController: (id: string) => AtermControllerProbe
+          findActiveCanvas: (id: string) => HTMLCanvasElement
+        }
+        const ctrl = finders.findActiveController(ptyId)
+        let bulk = ''
+        for (let i = 0; i < 300; i++) {
+          bulk += `scrollback line ${i}\r\n`
+        }
+        ctrl.process(bulk)
+        const atBottom = ctrl.displayOffset()
+        const c = finders.findActiveCanvas(ptyId)
+        // deltaMode 1 (lines), negative deltaY = wheel up = reveal older history.
+        c.dispatchEvent(
+          new WheelEvent('wheel', { deltaY: -40, deltaMode: 1, bubbles: true, cancelable: true })
+        )
+        return { atBottom, after: ctrl.displayOffset() }
+      },
+      { findersSrc, ptyId }
+    )
+
+    expect(offsetAfterWheel.atBottom, 'live output snaps the viewport to the bottom').toBe(0)
+    expect(
+      offsetAfterWheel.after,
+      'wheel-up should scroll the viewport into scrollback'
+    ).toBeGreaterThan(0)
+
+    // --- SELECTION + COPY (gated by terminalClipboardOnSelect) ---------------
+    // Snap to bottom, print known rows, then drag across them with synthetic mouse
+    // events. Assert the gate BOTH ways: with copy-on-select OFF (the default) a
+    // drag selects but must NOT touch the clipboard; with it ON the drag auto-copies.
+    const selection = await orcaPage.evaluate(
+      async ({ findersSrc, ptyId }) => {
+        // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
+        const finders = new Function(findersSrc)() as {
+          findActiveController: (id: string) => AtermControllerProbe
+          findActiveCanvas: (id: string) => HTMLCanvasElement
+        }
+        const ctrl = finders.findActiveController(ptyId)
+        ctrl.scrollLines(-100000) // snap to bottom
+        let rows = ''
+        for (let i = 0; i < 6; i++) {
+          rows += `ATERMSELECT_ROW_${i}__________\r\n`
+        }
+        ctrl.process(rows)
+
+        const c = finders.findActiveCanvas(ptyId)
+        const dpr = window.devicePixelRatio || 1
+        // Hidden-window layout reports rect.left/top == 0, so pass canvas-relative
+        // client coordinates (device pixels / dpr). The controller maps these back
+        // to grid cells via getBoundingClientRect (left/top 0) * dpr.
+        const mk = (type: string, deviceX: number, deviceY: number): MouseEvent =>
+          new MouseEvent(type, {
+            button: 0,
+            buttons: 1,
+            clientX: deviceX / dpr,
+            clientY: deviceY / dpr,
+            bubbles: true,
+            cancelable: true
+          })
+        const win = window as unknown as { __atermLastCopied?: string }
+        const drag = (): void => {
+          c.dispatchEvent(mk('mousedown', 4, 4))
+          c.dispatchEvent(mk('mousemove', 400, 80))
+          window.dispatchEvent(mk('mouseup', 400, 80))
+        }
+
+        // copy-on-select OFF (default): drag selects but the clipboard stays untouched.
+        await window.__store?.getState().updateSettings({ terminalClipboardOnSelect: false })
+        win.__atermLastCopied = ''
+        drag()
+        const offText = ctrl.selectionText()
+        const offCopied = win.__atermLastCopied ?? ''
+
+        // copy-on-select ON: the same drag now auto-copies the selection.
+        await window.__store?.getState().updateSettings({ terminalClipboardOnSelect: true })
+        win.__atermLastCopied = ''
+        drag()
+        const onText = ctrl.selectionText()
+        const onCopied = win.__atermLastCopied ?? ''
+
+        return { offText, offCopied, onText, onCopied }
+      },
+      { findersSrc, ptyId }
+    )
+
+    expect(
+      selection.offText.length,
+      'a canvas drag should produce a non-empty selection'
+    ).toBeGreaterThan(0)
+    expect(
+      selection.offCopied,
+      'with copy-on-select OFF (default), a drag must NOT write the clipboard'
+    ).toBe('')
+    expect(
+      selection.onText.length,
+      'a canvas drag should produce a non-empty selection'
+    ).toBeGreaterThan(0)
+    expect(
+      selection.onCopied.length,
+      'with copy-on-select ON, mouseup copies the selection'
+    ).toBeGreaterThan(0)
+    expect(selection.onCopied, 'clipboard should hold the selected text').toBe(selection.onText)
+
+    // Screenshot the final canvas state.
+    const dataUrl = await orcaPage.evaluate(
+      ({ findersSrc, ptyId }) => {
+        // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
+        const finders = new Function(findersSrc)() as {
+          findActiveCanvas: (id: string) => HTMLCanvasElement
+        }
+        return finders.findActiveCanvas(ptyId).toDataURL('image/png')
+      },
+      { findersSrc, ptyId }
+    )
+    expect(dataUrl.startsWith('data:image/png;base64,')).toBe(true)
+    writeFileSync('/tmp/aterm-phase1.png', Buffer.from(dataUrl.split(',')[1], 'base64'))
+  })
+})

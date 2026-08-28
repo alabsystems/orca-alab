@@ -1,0 +1,1185 @@
+{
+  "module": "worktree-ownership",
+  "source": "src/shared/worktree-ownership.ts",
+  "rustCrate": "orca-core::worktree_ownership",
+  "cases": [
+    {
+      "function": "isLegacyRepoForExternalWorktreeVisibility",
+      "note": "persisted repo without explicit visibility is legacy for upgrade safety",
+      "input": {
+        "path": "/repos/app",
+        "addedAt": 1779494400001
+      },
+      "expected": true
+    },
+    {
+      "function": "isLegacyRepoForExternalWorktreeVisibility",
+      "note": "explicit legacy marker false wins after a visibility change",
+      "input": {
+        "path": "/repos/app",
+        "addedAt": 1779494400001,
+        "externalWorktreeVisibility": "hide",
+        "externalWorktreeVisibilityLegacy": false
+      },
+      "expected": false
+    },
+    {
+      "function": "isLegacyRepoForExternalWorktreeVisibility",
+      "note": "non-finite addedAt (Number.NaN persists as null) is treated as legacy",
+      "input": {
+        "path": "/repos/app",
+        "externalWorktreeVisibility": "show",
+        "addedAt": null
+      },
+      "expected": true
+    },
+    {
+      "function": "effectiveExternalWorktreeVisibility",
+      "note": "undefined visibility defaults to hide for new repos",
+      "input": {
+        "repo": {},
+        "isLegacyRepoForVisibility": false
+      },
+      "expected": "hide"
+    },
+    {
+      "function": "effectiveExternalWorktreeVisibility",
+      "note": "undefined visibility defaults to show for legacy repos",
+      "input": {
+        "repo": {},
+        "isLegacyRepoForVisibility": true
+      },
+      "expected": "show"
+    },
+    {
+      "function": "buildKnownOrcaWorkspaceLayouts",
+      "note": "absolute workspaceDir yields one layout carrying the global nest mode",
+      "input": {
+        "settings": {
+          "workspaceDir": "/orca/workspaces",
+          "nestWorkspaces": true,
+          "workspaceDirHistory": []
+        },
+        "repo": {
+          "path": "/repos/app"
+        }
+      },
+      "expected": [
+        {
+          "path": "/orca/workspaces",
+          "nestWorkspaces": true
+        }
+      ]
+    },
+    {
+      "function": "buildKnownOrcaWorkspaceLayouts",
+      "note": "no repo: workspaceDir is used verbatim, flat mode preserved",
+      "input": {
+        "settings": {
+          "workspaceDir": "/orca/workspaces",
+          "nestWorkspaces": false,
+          "workspaceDirHistory": []
+        }
+      },
+      "expected": [
+        {
+          "path": "/orca/workspaces",
+          "nestWorkspaces": false
+        }
+      ]
+    },
+    {
+      "function": "buildKnownOrcaWorkspaceLayouts",
+      "note": "remote repo (connectionId) drops an absolute local workspaceDir entirely",
+      "input": {
+        "settings": {
+          "workspaceDir": "/orca/workspaces",
+          "nestWorkspaces": true,
+          "workspaceDirHistory": []
+        },
+        "repo": {
+          "path": "/repos/app",
+          "connectionId": "ssh-1"
+        }
+      },
+      "expected": []
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "explicit Orca metadata is managed even outside any workspace root",
+      "input": {
+        "repo": {
+          "path": "/repos/app"
+        },
+        "worktree": {
+          "path": "/tmp/outside",
+          "isMainWorktree": true
+        },
+        "meta": {
+          "orcaCreatedAt": 1
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ]
+      },
+      "expected": "orca-managed"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "nested repo-specific path shape is EXTERNAL without metadata (#7078: only metadata proves Orca created it)",
+      "input": {
+        "repo": {
+          "path": "/repos/app"
+        },
+        "worktree": {
+          "path": "/orca/workspaces/app/feature",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ]
+      },
+      "expected": "external"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "different repo folder under a nested root classifies as external",
+      "input": {
+        "repo": {
+          "path": "/repos/app"
+        },
+        "worktree": {
+          "path": "/orca/workspaces/other/feature",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ]
+      },
+      "expected": "external"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "no known layouts: an external-looking worktree stays unknown-legacy",
+      "input": {
+        "repo": {
+          "path": "/repos/app"
+        },
+        "worktree": {
+          "path": "/some/external/path",
+          "isMainWorktree": true
+        },
+        "knownOrcaLayouts": []
+      },
+      "expected": "unknown-legacy"
+    },
+    {
+      "function": "toDetectedWorktree",
+      "note": "selected linked checkout stays visible even when external is hidden",
+      "input": {
+        "repo": {
+          "path": "/repos/app-linked",
+          "externalWorktreeVisibility": "hide",
+          "addedAt": 1779494400001
+        },
+        "worktree": {
+          "path": "/repos/app-linked",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ]
+      },
+      "expected": {
+        "path": "/repos/app-linked",
+        "isMainWorktree": false,
+        "ownership": "external",
+        "selectedCheckout": true,
+        "visible": true
+      }
+    },
+    {
+      "function": "toDetectedWorktree",
+      "note": "unselected git main-worktree is external and hidden when visibility is hide",
+      "input": {
+        "repo": {
+          "path": "/repos/app-linked",
+          "externalWorktreeVisibility": "hide",
+          "addedAt": 1779494400001
+        },
+        "worktree": {
+          "path": "/repos/app-main",
+          "isMainWorktree": true
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ]
+      },
+      "expected": {
+        "path": "/repos/app-main",
+        "isMainWorktree": true,
+        "ownership": "external",
+        "selectedCheckout": false,
+        "visible": false
+      }
+    },
+    {
+      "function": "shouldShowWorktree",
+      "note": "unknown-legacy rows stay visible for legacy repos after hiding external rows",
+      "input": {
+        "repo": {
+          "externalWorktreeVisibility": "hide"
+        },
+        "worktree": {
+          "path": "/orca/workspaces/feature"
+        },
+        "ownership": "unknown-legacy",
+        "isLegacyRepoForVisibility": true,
+        "isSelectedCheckout": false
+      },
+      "expected": true
+    },
+    {
+      "function": "shouldShowWorktree",
+      "note": "external row hidden for non-legacy repo whose visibility is hide",
+      "input": {
+        "repo": {
+          "externalWorktreeVisibility": "hide"
+        },
+        "worktree": {
+          "path": "/orca/workspaces/feature"
+        },
+        "ownership": "external",
+        "isLegacyRepoForVisibility": false,
+        "isSelectedCheckout": false
+      },
+      "expected": false
+    },
+    {
+      "function": "areRuntimePathsEqual",
+      "note": "trailing slash is ignored by comparison normalization",
+      "input": {
+        "leftPath": "/repos/app/",
+        "rightPath": "/repos/app"
+      },
+      "expected": true
+    },
+    {
+      "function": "areRuntimePathsEqual",
+      "note": "distinct paths are not equal",
+      "input": {
+        "leftPath": "/repos/app",
+        "rightPath": "/repos/other"
+      },
+      "expected": false
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "orcaCreationWorkspaceLayout metadata alone proves Orca ownership (#7078)",
+      "input": {
+        "repo": {
+          "path": "/repos/app"
+        },
+        "worktree": {
+          "path": "/somewhere/else/feature",
+          "isMainWorktree": false
+        },
+        "meta": {
+          "orcaCreationWorkspaceLayout": {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        },
+        "knownOrcaLayouts": []
+      },
+      "expected": "orca-managed"
+    },
+    {
+      "function": "shouldShowWorktree",
+      "note": "agent scratch stays hidden even when the repo shows non-Orca worktrees (#9388)",
+      "input": {
+        "repo": {
+          "externalWorktreeVisibility": "show"
+        },
+        "worktree": {
+          "path": "/repos/app/.claude/worktrees/agent-a04ccaaa55ddadb91"
+        },
+        "ownership": "agent-scratch",
+        "isLegacyRepoForVisibility": false,
+        "isSelectedCheckout": false
+      },
+      "expected": false
+    },
+    {
+      "function": "shouldShowWorktree",
+      "note": "agent scratch is still shown when it is the selected checkout",
+      "input": {
+        "repo": {
+          "externalWorktreeVisibility": "hide"
+        },
+        "worktree": {
+          "path": "/repos/app/.claude/worktrees/agent-a04ccaaa55ddadb91"
+        },
+        "ownership": "agent-scratch",
+        "isLegacyRepoForVisibility": false,
+        "isSelectedCheckout": true
+      },
+      "expected": true
+    },
+    {
+      "function": "applyMetadataFallbackVisibility",
+      "note": "hidden agent scratch keeps its policy through the metadata fallback",
+      "input": {
+        "path": "/repos/app/.claude/worktrees/agent-a04ccaaa55ddadb91",
+        "isMainWorktree": false,
+        "ownership": "agent-scratch",
+        "selectedCheckout": false,
+        "visible": false
+      },
+      "expected": {
+        "path": "/repos/app/.claude/worktrees/agent-a04ccaaa55ddadb91",
+        "isMainWorktree": false,
+        "ownership": "agent-scratch",
+        "selectedCheckout": false,
+        "visible": false
+      }
+    },
+    {
+      "function": "applyMetadataFallbackVisibility",
+      "note": "an explicitly imported scratch row stays visible — the fallback hands it back untouched",
+      "input": {
+        "path": "/repos/app/.claude/worktrees/agent-a04ccaaa55ddadb91",
+        "isMainWorktree": false,
+        "ownership": "agent-scratch",
+        "selectedCheckout": false,
+        "visible": true
+      },
+      "expected": {
+        "path": "/repos/app/.claude/worktrees/agent-a04ccaaa55ddadb91",
+        "isMainWorktree": false,
+        "ownership": "agent-scratch",
+        "selectedCheckout": false,
+        "visible": true
+      }
+    },
+    {
+      "function": "applyMetadataFallbackVisibility",
+      "note": "external is demoted to unknown-legacy and revealed once the git scan is gone",
+      "input": {
+        "path": "/scratch/manual",
+        "isMainWorktree": false,
+        "ownership": "external",
+        "selectedCheckout": false,
+        "visible": false
+      },
+      "expected": {
+        "path": "/scratch/manual",
+        "isMainWorktree": false,
+        "ownership": "unknown-legacy",
+        "selectedCheckout": false,
+        "visible": true
+      }
+    },
+    {
+      "function": "applyMetadataFallbackVisibility",
+      "note": "orca-managed keeps its ownership while the fallback forces visible",
+      "input": {
+        "path": "/orca/workspaces/app/feature",
+        "isMainWorktree": false,
+        "ownership": "orca-managed",
+        "selectedCheckout": false,
+        "visible": false
+      },
+      "expected": {
+        "path": "/orca/workspaces/app/feature",
+        "isMainWorktree": false,
+        "ownership": "orca-managed",
+        "selectedCheckout": false,
+        "visible": true
+      }
+    },
+    {
+      "function": "applyMetadataFallbackVisibility",
+      "note": "an already-visible unknown-legacy row is unchanged, selectedCheckout included",
+      "input": {
+        "path": "/repos/app",
+        "isMainWorktree": true,
+        "ownership": "unknown-legacy",
+        "selectedCheckout": true,
+        "visible": true
+      },
+      "expected": {
+        "path": "/repos/app",
+        "isMainWorktree": true,
+        "ownership": "unknown-legacy",
+        "selectedCheckout": true,
+        "visible": true
+      }
+    },
+    {
+      "function": "applyMetadataFallbackVisibility",
+      "note": "boundary: the real caller shape — every field outside the lean projection rides the TS spread through",
+      "input": {
+        "id": "repo-1::/scratch/manual",
+        "repoId": "repo-1",
+        "path": "/scratch/manual",
+        "head": "abc",
+        "branch": "refs/heads/main",
+        "isBare": false,
+        "isMainWorktree": false,
+        "displayName": "main",
+        "comment": "",
+        "linkedIssue": null,
+        "isArchived": false,
+        "sortOrder": 0,
+        "lastActivityAt": 0,
+        "workspaceStatus": "todo",
+        "ownership": "external",
+        "selectedCheckout": false,
+        "visible": false
+      },
+      "expected": {
+        "id": "repo-1::/scratch/manual",
+        "repoId": "repo-1",
+        "path": "/scratch/manual",
+        "head": "abc",
+        "branch": "refs/heads/main",
+        "isBare": false,
+        "isMainWorktree": false,
+        "displayName": "main",
+        "comment": "",
+        "linkedIssue": null,
+        "isArchived": false,
+        "sortOrder": 0,
+        "lastActivityAt": 0,
+        "workspaceStatus": "todo",
+        "ownership": "unknown-legacy",
+        "selectedCheckout": false,
+        "visible": true
+      }
+    },
+    {
+      "function": "applyMetadataFallbackVisibility",
+      "note": "boundary: an off-union ownership string lands on unknown-legacy, same as the TS ternary",
+      "input": {
+        "path": "/scratch/manual",
+        "isMainWorktree": false,
+        "ownership": "not-a-real-ownership",
+        "selectedCheckout": false,
+        "visible": false
+      },
+      "expected": {
+        "path": "/scratch/manual",
+        "isMainWorktree": false,
+        "ownership": "unknown-legacy",
+        "selectedCheckout": false,
+        "visible": true
+      }
+    },
+    {
+      "function": "buildKnownOrcaWorkspaceLayouts",
+      "note": "worktreeBasePath is trimmed with the JS trim set: a pasted U+FEFF is stripped, so the base path stays absolute",
+      "input": {
+        "settings": {
+          "nestWorkspaces": true,
+          "workspaceDirHistory": []
+        },
+        "repo": {
+          "path": "/repos/app",
+          "worktreeBasePath": "﻿/abs/base"
+        }
+      },
+      "expected": [
+        {
+          "path": "/abs/base",
+          "nestWorkspaces": true
+        }
+      ]
+    },
+    {
+      "function": "buildKnownOrcaWorkspaceLayouts",
+      "note": "worktreeBasePath keeps U+0085 (NEL is not in the JS trim set), so the layout survives instead of trimming to empty",
+      "input": {
+        "settings": {
+          "nestWorkspaces": true,
+          "workspaceDirHistory": []
+        },
+        "repo": {
+          "path": "/repos/app",
+          "worktreeBasePath": ""
+        }
+      },
+      "expected": [
+        {
+          "path": "/repos/app/",
+          "nestWorkspaces": true
+        }
+      ]
+    },
+    {
+      "function": "buildKnownOrcaWorkspaceLayouts",
+      "note": "worktreeBasePath of only ASCII whitespace trims to empty and contributes no layout",
+      "input": {
+        "settings": {
+          "nestWorkspaces": true,
+          "workspaceDirHistory": []
+        },
+        "repo": {
+          "path": "/repos/app",
+          "worktreeBasePath": "  \t "
+        }
+      },
+      "expected": []
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "createdWithAgent is a TuiAgent string, and it alone is strong Orca metadata",
+      "input": {
+        "repo": {
+          "path": "/repos/app"
+        },
+        "worktree": {
+          "path": "/scratch/manual",
+          "isMainWorktree": false
+        },
+        "meta": {
+          "createdWithAgent": "claude"
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ]
+      },
+      "expected": "orca-managed"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "pushTarget is a GitPushTarget object, and it alone is strong Orca metadata",
+      "input": {
+        "repo": {
+          "path": "/repos/app"
+        },
+        "worktree": {
+          "path": "/scratch/manual",
+          "isMainWorktree": false
+        },
+        "meta": {
+          "pushTarget": {
+            "remoteName": "origin",
+            "branchName": "main"
+          }
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ]
+      },
+      "expected": "orca-managed"
+    },
+    {
+      "function": "toDetectedWorktree",
+      "note": "a row whose only Orca marker is createdWithAgent is managed, and managed rows stay visible under hide",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001,
+          "externalWorktreeVisibility": "hide"
+        },
+        "worktree": {
+          "path": "/scratch/manual",
+          "isMainWorktree": false
+        },
+        "meta": {
+          "createdWithAgent": "codex"
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ]
+      },
+      "expected": {
+        "path": "/scratch/manual",
+        "isMainWorktree": false,
+        "ownership": "orca-managed",
+        "selectedCheckout": false,
+        "visible": true
+      }
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "#9535/#9388 step 2: a Claude Code scratch worktree under the repo root is agent-scratch, not external",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001
+        },
+        "worktree": {
+          "path": "/repos/app/.claude/worktrees/agent-a04ccaaa55ddadb91",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ]
+      },
+      "expected": "agent-scratch"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "gsd parallel-agent workspaces are agent-scratch too",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001
+        },
+        "worktree": {
+          "path": "/repos/app/.gsd-workspaces/phase-1-subagent-2",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ]
+      },
+      "expected": "agent-scratch"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "step 2 runs BEFORE the layout heuristics: a scratch path under a flat Orca root is scratch, not unknown-legacy",
+      "input": {
+        "repo": {
+          "path": "/orca/workspaces",
+          "addedAt": 1779494400001
+        },
+        "worktree": {
+          "path": "/orca/workspaces/.claude/worktrees/agent-1",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": false
+          }
+        ]
+      },
+      "expected": "agent-scratch"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "Windows separators and drive casing still reach the scratch match",
+      "input": {
+        "repo": {
+          "path": "C:\\userhome\\dev\\app",
+          "addedAt": 1779494400001
+        },
+        "worktree": {
+          "path": "c:\\USERHOME\\dev\\app\\.Claude\\Worktrees\\agent-a04ccaaa",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": []
+      },
+      "expected": "agent-scratch"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "both WSL UNC aliases fold to the same checkout, so the scratch row matches across them",
+      "input": {
+        "repo": {
+          "path": "//wsl$/Ubuntu/home/dev/app",
+          "addedAt": 1779494400001
+        },
+        "worktree": {
+          "path": "//wsl.localhost/Ubuntu/home/dev/app/.claude/worktrees/agent-a04ccaaa",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": []
+      },
+      "expected": "agent-scratch"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "POSIX tool segments stay case-sensitive: .Claude/Worktrees is an ordinary directory",
+      "input": {
+        "repo": {
+          "path": "/userhome/dev/app",
+          "addedAt": 1779494400001
+        },
+        "worktree": {
+          "path": "/userhome/dev/app/.Claude/Worktrees/agent-a04ccaaa",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ]
+      },
+      "expected": "external"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "a supplied matcher reaches scratch created inside another linked checkout",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001
+        },
+        "worktree": {
+          "path": "/orca/workspaces/app/feature-x/.claude/worktrees/agent-1",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ],
+        "agentScratchCheckoutPaths": [
+          "/repos/app",
+          "/orca/workspaces/app/feature-x"
+        ]
+      },
+      "expected": "agent-scratch"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "same row without the matcher: the repo-root fallback does not know the linked checkout",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001
+        },
+        "worktree": {
+          "path": "/orca/workspaces/app/feature-x/.claude/worktrees/agent-1",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ]
+      },
+      "expected": "external"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "the twin uses ?? not ||: a supplied matcher that says no REPLACES the repo-root fallback",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001
+        },
+        "worktree": {
+          "path": "/repos/app/.claude/worktrees/agent-1",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ],
+        "agentScratchCheckoutPaths": [
+          "/somewhere/else"
+        ]
+      },
+      "expected": "external"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "an EMPTY checkout list is a matcher that matches nothing, not an absent matcher",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001
+        },
+        "worktree": {
+          "path": "/repos/app/.claude/worktrees/agent-1",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ],
+        "agentScratchCheckoutPaths": []
+      },
+      "expected": "external"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "strong Orca metadata still outranks the scratch path match (step 1 before step 2)",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001
+        },
+        "worktree": {
+          "path": "/repos/app/.claude/worktrees/agent-1",
+          "isMainWorktree": false
+        },
+        "meta": {
+          "orcaCreatedAt": 1
+        },
+        "knownOrcaLayouts": []
+      },
+      "expected": "orca-managed"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "a repo stored below a scratch-looking parent does not make its own rows scratch",
+      "input": {
+        "repo": {
+          "path": "/userhome/dev/.claude/worktrees/app",
+          "addedAt": 1779494400001
+        },
+        "worktree": {
+          "path": "/userhome/dev/.claude/worktrees/app/manual/feature-x",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": []
+      },
+      "expected": "unknown-legacy"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "the scratch container itself has no descendant, so it is not a scratch worktree",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001
+        },
+        "worktree": {
+          "path": "/repos/app/.gsd-workspaces",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": []
+      },
+      "expected": "unknown-legacy"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "scratch anchored to the POSIX root: split drops the separator the checkout key keeps",
+      "input": {
+        "repo": {
+          "path": "/",
+          "addedAt": 1779494400001
+        },
+        "worktree": {
+          "path": "/.claude/worktrees/agent-1",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": []
+      },
+      "expected": "agent-scratch"
+    },
+    {
+      "function": "classifyWorktreeOwnership",
+      "note": "scratch anchored to a Windows drive root: the C: segment regrows its slash",
+      "input": {
+        "repo": {
+          "path": "C:\\",
+          "addedAt": 1779494400001
+        },
+        "worktree": {
+          "path": "C:\\.claude\\worktrees\\agent-1",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": []
+      },
+      "expected": "agent-scratch"
+    },
+    {
+      "function": "shouldShowWorktree",
+      "note": "#9535: an explicitly imported external row is shown even while repo visibility is hide",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001,
+          "externalWorktreeVisibility": "hide"
+        },
+        "worktree": {
+          "path": "/scratch/imported"
+        },
+        "ownership": "external",
+        "isLegacyRepoForVisibility": false,
+        "isSelectedCheckout": false,
+        "importedExternalWorktreePaths": [
+          "/scratch/imported"
+        ]
+      },
+      "expected": true
+    },
+    {
+      "function": "shouldShowWorktree",
+      "note": "the import override outranks the agent-scratch hide rule",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001,
+          "externalWorktreeVisibility": "hide"
+        },
+        "worktree": {
+          "path": "/repos/app/.claude/worktrees/agent-a04ccaaa55ddadb91"
+        },
+        "ownership": "agent-scratch",
+        "isLegacyRepoForVisibility": false,
+        "isSelectedCheckout": false,
+        "importedExternalWorktreePaths": [
+          "/repos/app/.claude/worktrees/agent-a04ccaaa55ddadb91"
+        ]
+      },
+      "expected": true
+    },
+    {
+      "function": "shouldShowWorktree",
+      "note": "importing some OTHER path leaves the scratch row hidden",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001,
+          "externalWorktreeVisibility": "show"
+        },
+        "worktree": {
+          "path": "/repos/app/.claude/worktrees/agent-a04ccaaa55ddadb91"
+        },
+        "ownership": "agent-scratch",
+        "isLegacyRepoForVisibility": false,
+        "isSelectedCheckout": false,
+        "importedExternalWorktreePaths": [
+          "/scratch/imported"
+        ]
+      },
+      "expected": false
+    },
+    {
+      "function": "shouldShowWorktree",
+      "note": "the stored import is compared through the comparison fold, so a trailing slash still matches",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001,
+          "externalWorktreeVisibility": "hide"
+        },
+        "worktree": {
+          "path": "/scratch/imported"
+        },
+        "ownership": "external",
+        "isLegacyRepoForVisibility": false,
+        "isSelectedCheckout": false,
+        "importedExternalWorktreePaths": [
+          "/scratch/imported/"
+        ]
+      },
+      "expected": true
+    },
+    {
+      "function": "shouldShowWorktree",
+      "note": "Windows separators and casing fold, so a stored posix-spelled drive path matches",
+      "input": {
+        "repo": {
+          "path": "C:\\repos\\app",
+          "addedAt": 1779494400001,
+          "externalWorktreeVisibility": "hide"
+        },
+        "worktree": {
+          "path": "C:\\scratch\\Imported"
+        },
+        "ownership": "external",
+        "isLegacyRepoForVisibility": false,
+        "isSelectedCheckout": false,
+        "importedExternalWorktreePaths": [
+          "c:/scratch/imported"
+        ]
+      },
+      "expected": true
+    },
+    {
+      "function": "shouldShowWorktree",
+      "note": "POSIX case is significant: a differently-cased stored path is a different worktree",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001,
+          "externalWorktreeVisibility": "hide"
+        },
+        "worktree": {
+          "path": "/scratch/imported"
+        },
+        "ownership": "external",
+        "isLegacyRepoForVisibility": false,
+        "isSelectedCheckout": false,
+        "importedExternalWorktreePaths": [
+          "/scratch/Imported"
+        ]
+      },
+      "expected": false
+    },
+    {
+      "function": "shouldShowWorktree",
+      "note": "an empty stored path is an ordinary entry, never a wildcard",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001,
+          "externalWorktreeVisibility": "hide"
+        },
+        "worktree": {
+          "path": "/scratch/imported"
+        },
+        "ownership": "external",
+        "isLegacyRepoForVisibility": false,
+        "isSelectedCheckout": false,
+        "importedExternalWorktreePaths": [
+          ""
+        ]
+      },
+      "expected": false
+    },
+    {
+      "function": "toDetectedWorktree",
+      "note": "end to end: a scratch row is hidden even for a repo that shows non-Orca worktrees (#9535)",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001,
+          "externalWorktreeVisibility": "show"
+        },
+        "worktree": {
+          "path": "/repos/app/.claude/worktrees/agent-a04ccaaa55ddadb91",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ]
+      },
+      "expected": {
+        "path": "/repos/app/.claude/worktrees/agent-a04ccaaa55ddadb91",
+        "isMainWorktree": false,
+        "ownership": "agent-scratch",
+        "selectedCheckout": false,
+        "visible": false
+      }
+    },
+    {
+      "function": "toDetectedWorktree",
+      "note": "end to end: repo.importedExternalWorktreePaths reveals the same scratch row",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001,
+          "externalWorktreeVisibility": "show",
+          "importedExternalWorktreePaths": [
+            "/repos/app/.claude/worktrees/agent-a04ccaaa55ddadb91"
+          ]
+        },
+        "worktree": {
+          "path": "/repos/app/.claude/worktrees/agent-a04ccaaa55ddadb91",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ]
+      },
+      "expected": {
+        "path": "/repos/app/.claude/worktrees/agent-a04ccaaa55ddadb91",
+        "isMainWorktree": false,
+        "ownership": "agent-scratch",
+        "selectedCheckout": false,
+        "visible": true
+      }
+    },
+    {
+      "function": "toDetectedWorktree",
+      "note": "a repo registered AT a scratch path is its own selected checkout: scratch ownership, still visible",
+      "input": {
+        "repo": {
+          "path": "/repos/app/.claude/worktrees/agent-1",
+          "addedAt": 1779494400001,
+          "externalWorktreeVisibility": "hide"
+        },
+        "worktree": {
+          "path": "/repos/app/.claude/worktrees/agent-1",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": [],
+        "agentScratchCheckoutPaths": [
+          "/repos/app",
+          "/repos/app/.claude/worktrees/agent-1"
+        ]
+      },
+      "expected": {
+        "path": "/repos/app/.claude/worktrees/agent-1",
+        "isMainWorktree": false,
+        "ownership": "agent-scratch",
+        "selectedCheckout": true,
+        "visible": true
+      }
+    },
+    {
+      "function": "toDetectedWorktree",
+      "note": "an explicit import in the repo does not leak to a different row",
+      "input": {
+        "repo": {
+          "path": "/repos/app",
+          "addedAt": 1779494400001,
+          "externalWorktreeVisibility": "hide",
+          "importedExternalWorktreePaths": [
+            "/scratch/imported"
+          ]
+        },
+        "worktree": {
+          "path": "/scratch/other",
+          "isMainWorktree": false
+        },
+        "knownOrcaLayouts": [
+          {
+            "path": "/orca/workspaces",
+            "nestWorkspaces": true
+          }
+        ]
+      },
+      "expected": {
+        "path": "/scratch/other",
+        "isMainWorktree": false,
+        "ownership": "external",
+        "selectedCheckout": false,
+        "visible": false
+      }
+    }
+  ]
+}

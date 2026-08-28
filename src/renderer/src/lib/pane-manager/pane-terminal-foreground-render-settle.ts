@@ -1,0 +1,210 @@
+import { forceRepaintThroughRenderPause } from './terminal-render-pause-release'
+import { bumpTerminalWriteGeneration } from './terminal-write-generation'
+import { runGuardedWriteCompletionStep } from './xterm-write-callback-guard'
+
+export type ForegroundTerminalOutputTarget = {
+  buffer?: {
+    active?: {
+      cursorY?: number
+      baseY?: number
+      viewportY?: number
+    }
+  }
+  rows?: number
+  _core?: {
+    refresh?(start: number, end: number, sync?: boolean): void
+  }
+  refresh?(start: number, end: number): void
+  write(data: string, callback?: () => void): void
+  // Why: the engine is fed up front via the output mirror, so the foreground
+  // settle write must use the callback-only path to avoid re-parsing the bytes.
+  __schedulerWrite?(data: string, callback?: () => void): void
+  // Why: __schedulerWrite paints nothing (callback-only), so the aterm facade
+  // exposes this to flush the engine's mirrored state to the canvas after a write.
+  __scheduleAtermDraw?(): void
+}
+
+type ForegroundTerminalWriteOptions = {
+  forceViewportRefresh?: boolean
+  followupViewportRefresh?: boolean
+  shouldRefreshViewportSynchronously?: () => boolean
+  shouldReleaseRenderPause?: () => boolean
+  onParsed?: () => void
+  onWriteFailure?: () => void
+}
+
+const pendingViewportSettleRefreshByTerminal = new WeakMap<
+  ForegroundTerminalOutputTarget,
+  { kind: 'raf'; id: number } | { kind: 'timeout'; id: ReturnType<typeof setTimeout> }
+>()
+
+type ViewportSnapshot = {
+  baseY: number | null
+  viewportY: number | null
+}
+
+function refreshVisibleRows(
+  terminal: ForegroundTerminalOutputTarget,
+  synchronously: boolean,
+  shouldReleaseRenderPause?: () => boolean
+): void {
+  if (typeof terminal.rows !== 'number' || terminal.rows < 1) {
+    return
+  }
+
+  try {
+    // Why: only reveal-owned replay may override xterm's paused observer state;
+    // ordinary or newly-hidden output must leave background rendering paused.
+    if (shouldReleaseRenderPause?.() === true && forceRepaintThroughRenderPause(terminal)) {
+      return
+    }
+    const start = 0
+    const end = Math.max(0, terminal.rows - 1)
+    // Why: DOM-rendered Windows ConPTY rewrites need an immediate repair, while
+    // WebGL can merge this full-grid request into xterm's already-queued frame.
+    if (synchronously && typeof terminal._core?.refresh === 'function') {
+      terminal._core.refresh(start, end, true)
+      return
+    }
+    if (typeof terminal.refresh === 'function') {
+      terminal.refresh(start, end)
+      return
+    }
+    terminal._core?.refresh?.(start, end, false)
+  } catch {
+    // Ignore disposed terminals; PTY output can race pane teardown.
+  }
+}
+
+function captureViewportSnapshot(terminal: ForegroundTerminalOutputTarget): ViewportSnapshot {
+  return {
+    baseY: typeof terminal.buffer?.active?.baseY === 'number' ? terminal.buffer.active.baseY : null,
+    viewportY:
+      typeof terminal.buffer?.active?.viewportY === 'number'
+        ? terminal.buffer.active.viewportY
+        : null
+  }
+}
+
+function viewportChangedDuringWrite(
+  terminal: ForegroundTerminalOutputTarget,
+  beforeWrite: ViewportSnapshot
+): boolean {
+  const afterWrite = captureViewportSnapshot(terminal)
+  return (
+    afterWrite.baseY !== null &&
+    afterWrite.viewportY !== null &&
+    (afterWrite.baseY !== beforeWrite.baseY || afterWrite.viewportY !== beforeWrite.viewportY)
+  )
+}
+
+function cancelScheduledViewportSettleRefresh(terminal: ForegroundTerminalOutputTarget): void {
+  const pending = pendingViewportSettleRefreshByTerminal.get(terminal)
+  if (!pending) {
+    return
+  }
+  pendingViewportSettleRefreshByTerminal.delete(terminal)
+  if (pending.kind === 'raf') {
+    if (typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(pending.id)
+    }
+    return
+  }
+  clearTimeout(pending.id)
+}
+
+function scheduleViewportSettleRefresh(
+  terminal: ForegroundTerminalOutputTarget,
+  shouldRefreshSynchronously?: () => boolean,
+  shouldReleaseRenderPause?: () => boolean
+): void {
+  cancelScheduledViewportSettleRefresh(terminal)
+  if (typeof requestAnimationFrame === 'function') {
+    const id = requestAnimationFrame(() => {
+      pendingViewportSettleRefreshByTerminal.delete(terminal)
+      refreshVisibleRows(terminal, shouldRefreshSynchronously?.() ?? true, shouldReleaseRenderPause)
+    })
+    pendingViewportSettleRefreshByTerminal.set(terminal, { kind: 'raf', id })
+    return
+  }
+
+  const id = setTimeout(() => {
+    pendingViewportSettleRefreshByTerminal.delete(terminal)
+    refreshVisibleRows(terminal, shouldRefreshSynchronously?.() ?? true, shouldReleaseRenderPause)
+  }, 16)
+  pendingViewportSettleRefreshByTerminal.set(terminal, { kind: 'timeout', id })
+}
+
+function settleForegroundRender(
+  terminal: ForegroundTerminalOutputTarget,
+  beforeWriteViewport: ViewportSnapshot,
+  options: ForegroundTerminalWriteOptions
+): void {
+  refreshVisibleRows(
+    terminal,
+    options.shouldRefreshViewportSynchronously?.() ?? true,
+    options.shouldReleaseRenderPause
+  )
+  // Why: when output advances the viewport, Chromium can paint the freshly
+  // scrolled top row one frame later than xterm finishes parsing. Repaint once
+  // more after the scroll settles so the user doesn't need to jiggle the window.
+  if (
+    options.followupViewportRefresh ||
+    viewportChangedDuringWrite(terminal, beforeWriteViewport)
+  ) {
+    scheduleViewportSettleRefresh(
+      terminal,
+      options.shouldRefreshViewportSynchronously,
+      options.shouldReleaseRenderPause
+    )
+  }
+}
+
+export function writeForegroundTerminalChunk(
+  terminal: ForegroundTerminalOutputTarget,
+  data: string,
+  options: ForegroundTerminalWriteOptions = {}
+): boolean {
+  if (data.length > 0) {
+    // Why: deep scrollback hydration fences on this to detect any concurrent writer (terminal-write-generation.ts).
+    bumpTerminalWriteGeneration(terminal)
+  }
+  const beforeWriteViewport = options.forceViewportRefresh
+    ? captureViewportSnapshot(terminal)
+    : null
+  // Why guarded steps: this callback runs inside the engine's write-completion
+  // loop, where an escaping throw permanently wedges the terminal (see
+  // xterm-write-callback-guard.ts). Guard settle and onParsed separately so a
+  // renderer failure during settle can't starve the replay-guard release.
+  const runCompletionSteps = (): void => {
+    if (beforeWriteViewport) {
+      runGuardedWriteCompletionStep('foreground-render-settle', () =>
+        settleForegroundRender(terminal, beforeWriteViewport, options)
+      )
+    }
+    if (options.onParsed) {
+      runGuardedWriteCompletionStep('foreground-on-parsed', options.onParsed)
+    }
+  }
+  try {
+    // The mirror already fed the engine for scheduler/replay output, so use the
+    // callback-only path when available (aterm facade) to avoid a double-parse.
+    const writeChunk = terminal.__schedulerWrite ?? terminal.write
+    writeChunk.call(terminal, data, runCompletionSteps)
+    // __schedulerWrite is callback-only (no engine feed, no draw), so paint the
+    // engine's already-mirrored state to the canvas. Coalesced — no draw storm.
+    terminal.__scheduleAtermDraw?.()
+    return true
+  } catch {
+    // Why separate from parse completion: cleanup/recovery must run, but a
+    // synchronous write failure is not parser liveness evidence.
+    if (options.onWriteFailure) {
+      runGuardedWriteCompletionStep('foreground-on-write-failure', options.onWriteFailure)
+    }
+    return false
+  }
+}
+
+export function discardForegroundRenderSettle(terminal: ForegroundTerminalOutputTarget): void {
+  cancelScheduledViewportSettleRefresh(terminal)
+}

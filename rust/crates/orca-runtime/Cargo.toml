@@ -1,0 +1,29 @@
+[package]
+name = "orca-runtime"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Runtime orchestration for Orca: the multi-agent coordination store (messages, tasks, dispatch, gates), ported from src/main/runtime/orchestration."
+
+[dependencies]
+orca-store = { path = "../orca-store" }
+# Same vendored, bundled SQLite as orca-store (version-matched so the
+# libsqlite3-sys build is shared).
+rusqlite = { version = "0.31", default-features = false, features = ["bundled"] }
+# Deps are stored/read as JSON string arrays (byte-identical to the TS
+# `JSON.stringify`), and DAG promotion parses them back.
+serde_json = { version = "1", default-features = false, features = ["std"] }
+# Row structs derive Serialize so the napi shim can marshal them to the exact
+# TS Row JSON (snake_case columns; `type` via serde rename).
+serde = { version = "1", default-features = false, features = ["std", "derive"] }
+# Capability minting is the TS `randomBytes(32)` — an unforgeable auth token, so
+# it needs the OS CSPRNG, not SQLite's `randomblob`. Already vendored (0.3.4).
+getrandom = { version = "0.3", default-features = false }
+# `timingSafeEqual` equivalent: the capability-hash compare must stay
+# constant-time, so it goes through `ConstantTimeEq`, never `==`. Vendored 2.6.1.
+subtle = { version = "2", default-features = false }
+
+[lints.rust]
+unsafe_code = "forbid"
