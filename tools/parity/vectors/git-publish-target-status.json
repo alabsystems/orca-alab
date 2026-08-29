@@ -1,0 +1,23 @@
+{
+  "module": "git-publish-target-status",
+  "source": "src/shared/git-publish-target-status.ts",
+  "rustCrate": "orca-git::push_target",
+  "cases": [
+    {
+      "function": "getPublishTargetDisplayName",
+      "note": "remote/branch joined with a slash",
+      "input": { "remoteName": "origin", "branchName": "main" },
+      "expected": "origin/main"
+    },
+    {
+      "function": "getPublishTargetDisplayName",
+      "note": "branch name may itself contain slashes; remoteUrl is ignored",
+      "input": {
+        "remoteName": "upstream",
+        "branchName": "feature/foo",
+        "remoteUrl": "git@github.com:me/repo.git"
+      },
+      "expected": "upstream/feature/foo"
+    }
+  ]
+}

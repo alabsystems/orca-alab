@@ -1,0 +1,326 @@
+import { isSnapshotBackedTerminalPty } from './terminal-park-snapshot-class'
+import type { TerminalTab } from '../../../../shared/types'
+
+// Why: re-export so the parking policy's callers keep one import surface; the
+// class-resolver split only serves the max-lines budget.
+export {
+  isSnapshotBackedTerminalPty,
+  terminalPtyParkSnapshotClass,
+  type SnapshotBackedTerminalPtyOptions,
+  type TerminalParkSnapshotClass
+} from './terminal-park-snapshot-class'
+
+// Why: cold-park hysteresis keeps a hidden pane mounted for 30s so quick tab
+// flips never pay a re-hydrate; hot-retain keeps a bounded recently-visible
+// working set warm for 5 minutes beyond that. The cap (not the clock) is the
+// primary evictor — 4 worktrees covers the ordinary working set, so parking
+// only engages for the many-worktree tail it was built for. Reveal cost is a
+// flat ~170ms remount regardless of buffer size, so cutting remount
+// *frequency* beats shaving replay.
+export const TERMINAL_WORKTREE_COLD_PARK_DELAY_MS = 30_000
+export const TERMINAL_WORKTREE_HOT_RETAIN_MS = 5 * 60_000
+export const TERMINAL_WORKTREE_HOT_RETAIN_LIMIT = 4
+export const TERMINAL_WORKTREE_PARK_DELAY_MS = TERMINAL_WORKTREE_COLD_PARK_DELAY_MS
+export const TERMINAL_TAB_COLD_PARK_DELAY_MS = 30_000
+export const TERMINAL_TAB_HOT_RETAIN_MS = 5 * 60_000
+export const TERMINAL_TAB_HOT_RETAIN_LIMIT = 6
+
+// Why: tests override these per call (instead of process.env reads inside the
+// module) to shrink the 30s hysteresis to test-friendly durations.
+export type TerminalColdParkPolicyOverrides = {
+  coldParkDelayMs?: number
+  hotRetainMs?: number
+  hotRetainLimit?: number
+}
+
+export type ColdParkableTerminalTab = Pick<TerminalTab, 'id' | 'ptyId' | 'pendingActivationSpawn'>
+
+export type TerminalWorktreeColdParkCandidate = {
+  worktreeId: string
+  terminalTabs: readonly ColdParkableTerminalTab[]
+  isVisible: boolean
+  shouldMeasureHiddenWorktree: boolean
+  hasActivityTerminalPortal: boolean
+  hiddenSinceMs: number | null
+}
+
+export type TerminalTabColdParkCandidate = ColdParkableTerminalTab & {
+  isVisible: boolean
+  hasActivityTerminalPortal: boolean
+  hiddenSinceMs: number | null
+  /** Higher means activated more recently; breaks same-pass hidden-time ties. */
+  lastActivatedSeq?: number
+}
+
+function getPendingActivationSpawnCount(value: boolean | number | undefined): number {
+  if (value === true) {
+    return 1
+  }
+  return typeof value === 'number' && value > 0 ? value : 0
+}
+
+export function canParkTerminalWorktreeRenderers(args: {
+  worktreeId: string
+  terminalTabs: readonly ColdParkableTerminalTab[]
+  pendingStartupByTabId: Readonly<Record<string, unknown>>
+  // Why: callers pass settings.terminalHiddenViewParking !== false — the
+  // design-doc kill switch that disables parking entirely.
+  parkingEnabled: boolean
+  remoteParkingEnabled?: boolean
+  isVisible: boolean
+  shouldMeasureHiddenWorktree: boolean
+  hasActivityTerminalPortal: boolean
+  hiddenSinceMs: number | null
+  nowMs: number
+  coldParkDelayMs?: number
+}): boolean {
+  if (
+    !args.parkingEnabled ||
+    args.isVisible ||
+    args.shouldMeasureHiddenWorktree ||
+    args.hasActivityTerminalPortal ||
+    args.hiddenSinceMs === null
+  ) {
+    return false
+  }
+  if (
+    args.nowMs - args.hiddenSinceMs <
+    (args.coldParkDelayMs ?? TERMINAL_WORKTREE_COLD_PARK_DELAY_MS)
+  ) {
+    return false
+  }
+  return args.terminalTabs.every((tab) => {
+    if (args.pendingStartupByTabId[tab.id] !== undefined) {
+      return false
+    }
+    if (getPendingActivationSpawnCount(tab.pendingActivationSpawn) > 0) {
+      return false
+    }
+    return isSnapshotBackedTerminalPty(tab.ptyId, args.worktreeId, {
+      remoteParkingEnabled: args.remoteParkingEnabled === true
+    })
+  })
+}
+
+export function canParkTerminalTabRenderer(args: {
+  worktreeId: string
+  terminalTab: TerminalTabColdParkCandidate
+  pendingStartupByTabId: Readonly<Record<string, unknown>>
+  parkingEnabled: boolean
+  remoteParkingEnabled?: boolean
+  nowMs: number
+  coldParkDelayMs?: number
+}): boolean {
+  const tab = args.terminalTab
+  if (
+    !args.parkingEnabled ||
+    tab.isVisible ||
+    tab.hasActivityTerminalPortal ||
+    tab.hiddenSinceMs === null
+  ) {
+    return false
+  }
+  if (args.nowMs - tab.hiddenSinceMs < (args.coldParkDelayMs ?? TERMINAL_TAB_COLD_PARK_DELAY_MS)) {
+    return false
+  }
+  if (args.pendingStartupByTabId[tab.id] !== undefined) {
+    return false
+  }
+  if (getPendingActivationSpawnCount(tab.pendingActivationSpawn) > 0) {
+    return false
+  }
+  return isSnapshotBackedTerminalPty(tab.ptyId, args.worktreeId, {
+    remoteParkingEnabled: args.remoteParkingEnabled === true
+  })
+}
+
+type ColdParkRetainCandidate = { id: string; hiddenSinceMs: number; lastActivatedSeq?: number }
+
+// Why: a view switch stamps every owned tab at once, so activation order must
+// break the routine hidden-time tie before the deterministic UUID fallback.
+function compareColdParkRecencyDesc(
+  a: ColdParkRetainCandidate,
+  b: ColdParkRetainCandidate
+): number {
+  if (a.hiddenSinceMs !== b.hiddenSinceMs) {
+    return b.hiddenSinceMs - a.hiddenSinceMs
+  }
+  const activationDelta = (b.lastActivatedSeq ?? -1) - (a.lastActivatedSeq ?? -1)
+  return activationDelta === 0 ? a.id.localeCompare(b.id) : activationDelta
+}
+
+// Why: the single most-recently-hidden candidate is the view the user just
+// switched away from; keeping it warm regardless of the TTL or cap means
+// switching back after any absence (a meeting, coffee) is always instant, the
+// remount cost users actually notice.
+function selectLastActiveRetainedId(candidates: ColdParkRetainCandidate[]): string | null {
+  let lastActive: ColdParkRetainCandidate | null = null
+  for (const candidate of candidates) {
+    if (lastActive === null || compareColdParkRecencyDesc(candidate, lastActive) < 0) {
+      lastActive = candidate
+    }
+  }
+  return lastActive?.id ?? null
+}
+
+// Why: hot-retain keeps the most recently hidden ids warm up to the limit;
+// ids hidden past hotRetainMs or beyond the limit cold-park. The last-active
+// id is exempt from both so returning to it never pays a remount.
+function selectIdsBeyondHotRetain(
+  candidates: ColdParkRetainCandidate[],
+  args: { nowMs: number; hotRetainMs: number; hotRetainLimit: number }
+): Set<string> {
+  const lastActiveId = selectLastActiveRetainedId(candidates)
+  const coldParkedIds = new Set<string>()
+  const retainedCandidates: ColdParkRetainCandidate[] = []
+  for (const candidate of candidates) {
+    if (candidate.id === lastActiveId) {
+      continue
+    }
+    if (args.nowMs - candidate.hiddenSinceMs >= args.hotRetainMs) {
+      coldParkedIds.add(candidate.id)
+    } else {
+      retainedCandidates.push(candidate)
+    }
+  }
+  retainedCandidates.sort(compareColdParkRecencyDesc)
+  // Why: the last-active id already holds one slot in the warm working set, so
+  // the cap counts it out — the remaining candidates fill hotRetainLimit-1.
+  const remainingLimit = lastActiveId === null ? args.hotRetainLimit : args.hotRetainLimit - 1
+  for (const candidate of retainedCandidates.slice(Math.max(0, remainingLimit))) {
+    coldParkedIds.add(candidate.id)
+  }
+  return coldParkedIds
+}
+
+export function selectColdParkedTerminalWorktrees(
+  args: {
+    worktrees: readonly TerminalWorktreeColdParkCandidate[]
+    pendingStartupByTabId: Readonly<Record<string, unknown>>
+    parkingEnabled: boolean
+    remoteParkingEnabled?: boolean
+    nowMs: number
+  } & TerminalColdParkPolicyOverrides
+): Set<string> {
+  if (!args.parkingEnabled) {
+    return new Set()
+  }
+  const coldParkDelayMs = args.coldParkDelayMs ?? TERMINAL_WORKTREE_COLD_PARK_DELAY_MS
+  const candidates: ColdParkRetainCandidate[] = []
+  for (const worktree of args.worktrees) {
+    if (
+      worktree.hiddenSinceMs === null ||
+      !canParkTerminalWorktreeRenderers({
+        ...worktree,
+        pendingStartupByTabId: args.pendingStartupByTabId,
+        parkingEnabled: args.parkingEnabled,
+        remoteParkingEnabled: args.remoteParkingEnabled === true,
+        nowMs: args.nowMs,
+        coldParkDelayMs
+      })
+    ) {
+      continue
+    }
+    candidates.push({ id: worktree.worktreeId, hiddenSinceMs: worktree.hiddenSinceMs })
+  }
+  return selectIdsBeyondHotRetain(candidates, {
+    nowMs: args.nowMs,
+    hotRetainMs: args.hotRetainMs ?? TERMINAL_WORKTREE_HOT_RETAIN_MS,
+    hotRetainLimit: args.hotRetainLimit ?? TERMINAL_WORKTREE_HOT_RETAIN_LIMIT
+  })
+}
+
+export function selectColdParkedTerminalTabs(
+  args: {
+    worktreeId: string
+    terminalTabs: readonly TerminalTabColdParkCandidate[]
+    pendingStartupByTabId: Readonly<Record<string, unknown>>
+    parkingEnabled: boolean
+    remoteParkingEnabled?: boolean
+    nowMs: number
+  } & TerminalColdParkPolicyOverrides
+): Set<string> {
+  if (!args.parkingEnabled) {
+    return new Set()
+  }
+  const coldParkDelayMs = args.coldParkDelayMs ?? TERMINAL_TAB_COLD_PARK_DELAY_MS
+  const candidates: ColdParkRetainCandidate[] = []
+  for (const tab of args.terminalTabs) {
+    if (
+      tab.hiddenSinceMs === null ||
+      !canParkTerminalTabRenderer({
+        worktreeId: args.worktreeId,
+        terminalTab: tab,
+        pendingStartupByTabId: args.pendingStartupByTabId,
+        parkingEnabled: args.parkingEnabled,
+        remoteParkingEnabled: args.remoteParkingEnabled === true,
+        nowMs: args.nowMs,
+        coldParkDelayMs
+      })
+    ) {
+      continue
+    }
+    candidates.push({
+      id: tab.id,
+      hiddenSinceMs: tab.hiddenSinceMs,
+      lastActivatedSeq: tab.lastActivatedSeq
+    })
+  }
+  return selectIdsBeyondHotRetain(candidates, {
+    nowMs: args.nowMs,
+    hotRetainMs: args.hotRetainMs ?? TERMINAL_TAB_HOT_RETAIN_MS,
+    hotRetainLimit: args.hotRetainLimit ?? TERMINAL_TAB_HOT_RETAIN_LIMIT
+  })
+}
+
+// Why: parking decisions change only at the cold-park and hot-retain
+// deadlines, so callers schedule one recheck at the next deadline instead of
+// polling.
+function nextColdParkDeadlineDelayMs(args: {
+  parkingEnabled: boolean
+  hiddenSinceMs: number | null
+  nowMs: number
+  coldParkDelayMs: number
+  hotRetainMs: number
+}): number | null {
+  if (!args.parkingEnabled || args.hiddenSinceMs === null) {
+    return null
+  }
+  const pendingDeadlines = [
+    args.hiddenSinceMs + args.coldParkDelayMs,
+    args.hiddenSinceMs + args.hotRetainMs
+  ].filter((deadlineMs) => deadlineMs > args.nowMs)
+  return pendingDeadlines.length === 0 ? null : Math.min(...pendingDeadlines) - args.nowMs
+}
+
+export function getTerminalWorktreeColdParkRecheckDelayMs(args: {
+  parkingEnabled: boolean
+  hiddenSinceMs: number | null
+  nowMs: number
+  coldParkDelayMs?: number
+  hotRetainMs?: number
+}): number | null {
+  return nextColdParkDeadlineDelayMs({
+    parkingEnabled: args.parkingEnabled,
+    hiddenSinceMs: args.hiddenSinceMs,
+    nowMs: args.nowMs,
+    coldParkDelayMs: args.coldParkDelayMs ?? TERMINAL_WORKTREE_COLD_PARK_DELAY_MS,
+    hotRetainMs: args.hotRetainMs ?? TERMINAL_WORKTREE_HOT_RETAIN_MS
+  })
+}
+
+export function getTerminalTabColdParkRecheckDelayMs(args: {
+  parkingEnabled: boolean
+  hiddenSinceMs: number | null
+  nowMs: number
+  coldParkDelayMs?: number
+  hotRetainMs?: number
+}): number | null {
+  return nextColdParkDeadlineDelayMs({
+    parkingEnabled: args.parkingEnabled,
+    hiddenSinceMs: args.hiddenSinceMs,
+    nowMs: args.nowMs,
+    coldParkDelayMs: args.coldParkDelayMs ?? TERMINAL_TAB_COLD_PARK_DELAY_MS,
+    hotRetainMs: args.hotRetainMs ?? TERMINAL_TAB_HOT_RETAIN_MS
+  })
+}

@@ -1,0 +1,360 @@
+import type {
+  TerminalLayoutSnapshot,
+  TerminalPaneLayoutNode,
+  TerminalPaneSplitDirection
+} from '../../../../shared/types'
+import { isTerminalLeafId } from '../../../../shared/stable-pane-identity'
+import type { PaneManager } from '@/lib/pane-manager/pane-manager'
+import { replayIntoTerminal, type ReplayingPanesRef } from './replay-guard'
+import type { RestoredViewportBlankingPanesRef } from './terminal-restored-viewport'
+import { isTerminalInstanceDisposed } from '@/lib/pane-manager/terminal-instance-disposed'
+import { recordRendererCrashBreadcrumb } from '@/lib/crash-breadcrumb-recorder'
+import {
+  getLeftmostLeafId,
+  normalizeTerminalLayoutSnapshot,
+  resolveRootlessTerminalLayoutLeafId
+} from './terminal-layout-leaf-ids'
+
+export {
+  collectLeafIdsInOrder,
+  collectLeafIdsInReplayCreationOrder,
+  normalizeTerminalLayoutSnapshot
+} from './terminal-layout-leaf-ids'
+
+export const EMPTY_LAYOUT: TerminalLayoutSnapshot = {
+  root: null,
+  activeLeafId: null,
+  expandedLeafId: null
+}
+
+// Why: SerializeAddon replays mode bits assuming reattach to a live TUI, but Orca restores against a fresh shell with none, so stale bits (e.g. focus reporting rings the bell on click) must be reset.
+export const RESET_TERMINAL_CURSOR_STYLE = '\x1b[0 q'
+export const RESET_KITTY_KEYBOARD_PROTOCOL = '\x1b[<99u\x1b[=0u'
+// Why: abandoned byte-gap replay drains live chunks, so a dropped intensity reset must not style them (STA-4042). Also grounds background-color erase — a stale bg pen would otherwise paint the cells a following \x1b[2J clears.
+export const RESET_GRAPHIC_RENDITION = '\x1b[0m'
+// Last so a dead process cannot leave stale attributes in the DECSC register a live TUI's \x1b8 would restore.
+const SAVE_GROUNDED_CURSOR = '\x1b7'
+// Every mouse mode the daemon can re-arm from a snapshot: protocols 9/1000/1002/1003 + SGR encodings 1006/1016.
+export const RESET_MOUSE_REPORTING =
+  '\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1016l'
+
+// Why grounded: a serialized pane can end mid-pen, but the following fresh shell assumes default attributes.
+export const POST_REPLAY_MODE_RESET = `${RESET_GRAPHIC_RENDITION}${RESET_TERMINAL_CURSOR_STYLE}${RESET_KITTY_KEYBOARD_PROTOCOL}\x1b[?25h${RESET_MOUSE_REPORTING}\x1b[?1004l\x1b[?2004l${SAVE_GROUNDED_CURSOR}`
+
+// Why: same-session live replay; keep cursor/focus cleanup but preserve Kitty flags AND the pen the running TUI relies on.
+export const POST_REPLAY_LIVE_SNAPSHOT_RESET = `${RESET_TERMINAL_CURSOR_STYLE}\x1b[?25h\x1b[?1004l`
+
+// Why: the normal-buffer reattach fallback can follow a dead TUI, so its stale pen and saved pen must not reach the surviving shell; still clear cursor/focus/mouse/Kitty bits harmful to a plain shell after a bad TUI exit.
+export const POST_REPLAY_REATTACH_RESET = `${RESET_GRAPHIC_RENDITION}${RESET_TERMINAL_CURSOR_STYLE}${RESET_KITTY_KEYBOARD_PROTOCOL}\x1b[?25h${RESET_MOUSE_REPORTING}\x1b[?1004l${SAVE_GROUNDED_CURSOR}`
+
+// Why: an alt-screen reattach replays the daemon's rehydrate sequences, which re-arm the live TUI's mouse modes; wiping them one write later hands drags back to xterm's row selection (#8291). Normal-buffer panes keep RESET_MOUSE_REPORTING so a dead TUI's stale modes never reach a shell (#7893).
+export const POST_REPLAY_REATTACH_RESET_KEEP_MOUSE = `${RESET_TERMINAL_CURSOR_STYLE}${RESET_KITTY_KEYBOARD_PROTOCOL}\x1b[?25h\x1b[?1004l`
+
+// Why: a live agent owns focus reporting; resetting ?1004h suppresses the focus-in it needs to re-anchor its cursor (IME).
+export const POST_REPLAY_LIVE_AGENT_REATTACH_RESET = `${RESET_TERMINAL_CURSOR_STYLE}${RESET_KITTY_KEYBOARD_PROTOCOL}\x1b[?25h`
+
+// Why: DECTCEM applies in emission order, so the payload's last ?25l/?25h is the cursor state the TUI left.
+export function replayPayloadEndsWithCursorHidden(payload: string): boolean {
+  const hideIndex = payload.lastIndexOf('\x1b[?25l')
+  return hideIndex !== -1 && hideIndex > payload.lastIndexOf('\x1b[?25h')
+}
+
+// Why: some agents hide the real cursor and draw their own, so preserve the payload's final visibility (pty-connection re-shows it if the agent was actually a dead TUI).
+export function buildPostReplayLiveAgentReattachReset(payload: string): string {
+  return replayPayloadEndsWithCursorHidden(payload)
+    ? `${RESET_TERMINAL_CURSOR_STYLE}${RESET_KITTY_KEYBOARD_PROTOCOL}`
+    : POST_REPLAY_LIVE_AGENT_REATTACH_RESET
+}
+
+// Why: a live agent owns cursor/focus here; forcing ?25h/?1004l breaks a parked agent that only arms ?1004h at startup.
+export const POST_REPLAY_LIVE_AGENT_SNAPSHOT_RESET = RESET_TERMINAL_CURSOR_STYLE
+
+// State to re-establish when renderer-bound bytes were dropped and the gap can't be replayed away.
+// Scoped to the pen on purpose: a gap can also strand a charset designation, an open OSC 8 link, or a partial
+// escape, but each of those changes what a live TUI sees on a production path with no reported symptom, and the
+// pen is what the field reports actually show (STA-4042) — widen only with a symptom to point at.
+// Deliberately NOT a soft reset (DECSTR): xterm's DECSTR wipes kitty flags/stacks
+// (terminal-kitty-keyboard-mode-tracker applySoftReset), silencing Option chords for an agent that negotiates
+// them only at startup.
+export const RESET_AFTER_BYTE_GAP = RESET_GRAPHIC_RENDITION
+
+// Cross-platform monospace chain: browsers skip fonts absent on the current OS, so listing all is safe.
+// Nerd Fonts come last to cover PUA glyphs (U+E000–U+F8FF) from OMP/Powerline that standard monospace fonts lack.
+const FALLBACK_FONTS = [
+  'SF Mono', // macOS 10.12+
+  'Menlo', // macOS (older)
+  'Monaco', // macOS (legacy)
+  'Cascadia Mono', // Windows 11+
+  'Consolas', // Windows Vista+
+  'DejaVu Sans Mono', // Linux (common)
+  'Liberation Mono', // Linux (common)
+  'Orca Nerd Font Symbols', // bundled PUA fallback for OMP/Powerline glyphs
+  'Symbols Nerd Font Mono', // purpose-built Nerd Fonts symbols-only fallback
+  'MesloLGS Nerd Font', // p10k's recommended font; very common on zsh setups
+  'JetBrainsMono Nerd Font', // widely installed; Ghostty ships a JBM-derived font
+  'Hack Nerd Font', // common Nerd Font among Linux developers
+  'monospace' // ultimate generic fallback
+] as const
+
+export function buildFontFamily(fontFamily: string): string {
+  const trimmed = fontFamily.trim()
+  const parts = trimmed ? [`"${trimmed}"`] : []
+  const lowerParts = parts.map((p) => p.toLowerCase())
+  // Append each fallback unless already present (case-insensitive) to avoid duplicates.
+  for (const fallback of FALLBACK_FONTS) {
+    const lower = fallback.toLowerCase()
+    if (!lowerParts.some((p) => p.includes(lower))) {
+      // Generic keywords like "monospace" are unquoted; named fonts are quoted.
+      parts.push(fallback === 'monospace' ? fallback : `"${fallback}"`)
+    }
+  }
+  return parts.join(', ')
+}
+
+export function getLayoutChildNodes(split: HTMLElement): HTMLElement[] {
+  return Array.from(split.children).filter(
+    (child): child is HTMLElement =>
+      child instanceof HTMLElement &&
+      (child.classList.contains('pane') || child.classList.contains('pane-split'))
+  )
+}
+
+export function serializePaneTree(node: HTMLElement | null): TerminalPaneLayoutNode | null {
+  if (!node) {
+    return null
+  }
+
+  if (node.classList.contains('pane')) {
+    const leafId = node.dataset.leafId
+    if (!leafId || !isTerminalLeafId(leafId)) {
+      return null
+    }
+    return { type: 'leaf', leafId }
+  }
+
+  if (!node.classList.contains('pane-split')) {
+    return null
+  }
+  const [first, second] = getLayoutChildNodes(node)
+  const firstNode = serializePaneTree(first ?? null)
+  const secondNode = serializePaneTree(second ?? null)
+  if (!firstNode || !secondNode) {
+    return null
+  }
+
+  // Capture the flex ratio so resized panes survive serialization round-trips.
+  let ratio: number | undefined
+  if (first && second) {
+    const firstGrow = Number.parseFloat(first.style.flex) || 1
+    const secondGrow = Number.parseFloat(second.style.flex) || 1
+    const total = firstGrow + secondGrow
+    if (total > 0) {
+      const r = firstGrow / total
+      // Only store if meaningfully different from 0.5 (default equal split)
+      if (Math.abs(r - 0.5) > 0.005) {
+        ratio = Math.round(r * 1000) / 1000
+      }
+    }
+  }
+
+  return {
+    type: 'split',
+    direction: node.classList.contains('is-horizontal') ? 'horizontal' : 'vertical',
+    first: firstNode,
+    second: secondNode,
+    ...(ratio !== undefined && { ratio })
+  }
+}
+
+export function serializeTerminalLayout(
+  root: HTMLDivElement | null,
+  activePaneId: number | null,
+  expandedPaneId: number | null,
+  leafIdByPaneId?: ReadonlyMap<number, string>
+): TerminalLayoutSnapshot {
+  const rootNode = serializePaneTree(
+    root?.firstElementChild instanceof HTMLElement ? root.firstElementChild : null
+  )
+  const activeLeafId = activePaneId === null ? null : leafIdByPaneId?.get(activePaneId)
+  const expandedLeafId = expandedPaneId === null ? null : leafIdByPaneId?.get(expandedPaneId)
+  return {
+    root: rootNode,
+    activeLeafId: activeLeafId && isTerminalLeafId(activeLeafId) ? activeLeafId : null,
+    expandedLeafId: expandedLeafId && isTerminalLeafId(expandedLeafId) ? expandedLeafId : null
+  }
+}
+
+// Clamp bounds for per-pane Cmd+/- zoom; restore reuses them so a stale delta can't exceed live zoom limits.
+export const TERMINAL_PANE_MIN_FONT_SIZE = 8
+export const TERMINAL_PANE_MAX_FONT_SIZE = 32
+
+/**
+ * Map live per-pane font sizes (keyed by ephemeral paneId) to deltas from the
+ * global size keyed by stable leaf UUID. Zero deltas are omitted so unzoomed
+ * panes cost nothing in session JSON; returns undefined when nothing differs.
+ */
+export function serializePaneFontSizeDeltas(
+  paneFontSizesByPaneId: ReadonlyMap<number, number>,
+  leafIdByPaneId: ReadonlyMap<number, string>,
+  globalFontSize: number
+): Record<string, number> | undefined {
+  const deltasByLeafId: Record<string, number> = {}
+  for (const [paneId, fontSize] of paneFontSizesByPaneId) {
+    const leafId = leafIdByPaneId.get(paneId)
+    const delta = fontSize - globalFontSize
+    if (leafId && isTerminalLeafId(leafId) && Number.isFinite(delta) && delta !== 0) {
+      deltasByLeafId[leafId] = delta
+    }
+  }
+  return Object.keys(deltasByLeafId).length > 0 ? deltasByLeafId : undefined
+}
+
+/**
+ * Reapply persisted zoom deltas to restored panes. Returns paneId → fontSize
+ * for reseeding the live zoom map so later Cmd+/- steps continue from it.
+ */
+export function restorePaneFontSizes(
+  manager: PaneManager,
+  fontSizeDeltasByLeafId: Record<string, number> | undefined,
+  restoredPaneByLeafId: ReadonlyMap<string, number>,
+  globalFontSize: number
+): Map<number, number> {
+  const fontSizesByPaneId = new Map<number, number>()
+  if (!fontSizeDeltasByLeafId) {
+    return fontSizesByPaneId
+  }
+  const panesById = new Map(manager.getPanes().map((pane) => [pane.id, pane]))
+  for (const [leafId, delta] of Object.entries(fontSizeDeltasByLeafId)) {
+    const paneId = restoredPaneByLeafId.get(leafId)
+    const pane = paneId === undefined ? undefined : panesById.get(paneId)
+    if (!pane || typeof delta !== 'number' || !Number.isFinite(delta)) {
+      continue
+    }
+    // Why: clamp against the current global size — the user may have changed it since the delta was saved.
+    const fontSize = Math.min(
+      TERMINAL_PANE_MAX_FONT_SIZE,
+      Math.max(TERMINAL_PANE_MIN_FONT_SIZE, Math.round(globalFontSize + delta))
+    )
+    if (fontSize === globalFontSize) {
+      continue
+    }
+    fontSizesByPaneId.set(pane.id, fontSize)
+    pane.terminal.options.fontSize = fontSize
+  }
+  return fontSizesByPaneId
+}
+
+/** If the buffer ends inside the alt screen (agent TUI at shutdown), cut at the
+ *  final unmatched enter so the restored terminal is usable. The async deep-
+ *  restore rebuild cuts identically via altScreenReplayEndOffset (chunked scan,
+ *  no joined string) — keep the two in sync. */
+export function trimTrailingAltScreenEnter(buffer: string): string {
+  const lastOn = buffer.lastIndexOf('\x1b[?1049h')
+  const lastOff = buffer.lastIndexOf('\x1b[?1049l')
+  return lastOn > lastOff ? buffer.slice(0, lastOn) : buffer
+}
+
+/**
+ * Write saved scrollback buffers into restored panes so the user sees prior
+ * output after a restart. Exits alt-screen first if a buffer ended mid-TUI.
+ */
+export function restoreScrollbackBuffers(
+  manager: PaneManager,
+  savedBuffers: Record<string, string> | undefined,
+  restoredPaneByLeafId: Map<string, number>,
+  replayingPanesRef: ReplayingPanesRef,
+  restoredViewportBlankingPanesRef?: RestoredViewportBlankingPanesRef
+): void {
+  if (!savedBuffers) {
+    return
+  }
+  for (const [oldLeafId, buffer] of Object.entries(savedBuffers)) {
+    const newPaneId = restoredPaneByLeafId.get(oldLeafId)
+    if (newPaneId == null || !buffer) {
+      continue
+    }
+    const pane = manager.getPanes().find((p) => p.id === newPaneId)
+    if (!pane) {
+      continue
+    }
+    // Why this breadcrumb: a restore write into an already-disposed facade is
+    // wasted (feedEngine no-ops post-dispose) and, on the historic xterm path,
+    // was the suspected deterministic producer of startup zombie panes. Naming
+    // the moment here turns the last unproven link into a logged fact and skips
+    // the futile replay-guard cycle.
+    if (isTerminalInstanceDisposed(pane.terminal)) {
+      recordRendererCrashBreadcrumb('terminal_restore_write_target_disposed', {
+        paneId: pane.id
+      })
+      continue
+    }
+    try {
+      const renderOptions = {
+        shouldRefreshViewportSynchronously: () => !manager.hasWebglRenderer(pane.id)
+      }
+      const buf = trimTrailingAltScreenEnter(buffer)
+      if (buf.length > 0) {
+        // replayIntoTerminal: buffer queries (DA1/DECRQM/CPR) would auto-reply into the new shell's stdin. See replay-guard.ts.
+        // Ground the pen on both ends: a captured mid-run pen must not style the cells, and the grounded newline avoids both zsh's PROMPT_EOL_MARK (%) and a background-color erase from the captured pen.
+        replayIntoTerminal(
+          pane,
+          replayingPanesRef,
+          `${RESET_GRAPHIC_RENDITION}${buf}${RESET_GRAPHIC_RENDITION}\r\n`,
+          renderOptions
+        )
+        // Clear mode bits the buffer replayed: the fresh shell has no TUI to consume them. See POST_REPLAY_MODE_RESET.
+        replayIntoTerminal(pane, replayingPanesRef, POST_REPLAY_MODE_RESET, renderOptions)
+        // Why: connection resolution runs after layout replay; only fresh-shell paths move these rows into scrollback.
+        restoredViewportBlankingPanesRef?.current.add(pane.id)
+      }
+    } catch (error: unknown) {
+      // Breadcrumb: this catch was silent while zombie panes went undiagnosed.
+      recordRendererCrashBreadcrumb('terminal_restore_write_failed', {
+        paneId: pane.id,
+        errorName: error instanceof Error ? error.name : typeof error,
+        errorMessage: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+}
+
+export function replayTerminalLayout(
+  manager: PaneManager,
+  snapshot: TerminalLayoutSnapshot | null | undefined,
+  focusInitialPane: boolean
+): Map<string, number> {
+  const paneByLeafId = new Map<string, number>()
+
+  const normalized = normalizeTerminalLayoutSnapshot(snapshot)
+  snapshot = normalized.snapshot
+  const initialLeafId = snapshot.root
+    ? getLeftmostLeafId(snapshot.root)
+    : (resolveRootlessTerminalLayoutLeafId(snapshot) ?? undefined)
+  const initialPane = manager.createInitialPane({ focus: focusInitialPane, leafId: initialLeafId })
+  if (!snapshot?.root) {
+    paneByLeafId.set(initialPane.leafId, initialPane.id)
+    return paneByLeafId
+  }
+
+  const restoreNode = (node: TerminalPaneLayoutNode, paneId: number): void => {
+    if (node.type === 'leaf') {
+      paneByLeafId.set(node.leafId, paneId)
+      return
+    }
+
+    const createdPane = manager.splitPane(paneId, node.direction as TerminalPaneSplitDirection, {
+      ratio: node.ratio,
+      leafId: getLeftmostLeafId(node.second)
+    })
+    if (!createdPane) {
+      restoreNode(node.first, paneId)
+      return
+    }
+
+    restoreNode(node.first, paneId)
+    restoreNode(node.second, createdPane.id)
+  }
+
+  restoreNode(snapshot.root, initialPane.id)
+  return paneByLeafId
+}

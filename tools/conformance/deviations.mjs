@@ -1,0 +1,120 @@
+// Registry of confirmed places where the reference (xterm.js 6.1.0-beta.220)
+// deviates from the controlling spec (ECMA-48 / DEC STD 070 / VT5xx). The
+// differential fuzzer surfaces divergences; the ones where *xterm* is wrong land
+// here so they are documented EXPLICITLY rather than silently tolerated.
+//
+// `node deviations.mjs` re-verifies each entry against the live xterm.js and the
+// engine, and regenerates XTERM-DEVIATIONS.md. A deviation is only valid if:
+//   (1) xterm still exhibits the non-spec behaviour (probe matches `xterm`)
+//   (2) the engine follows the spec (probe matches `correct`)
+// If either fails, the entry is stale and the run exits non-zero.
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { createRequire } from 'node:module'
+import xpkg from '@xterm/headless'
+
+const { Terminal } = xpkg
+const require = createRequire(import.meta.url)
+const here = import.meta.dirname
+const { HeadlessTerminal } = require(
+  join(here, '..', '..', 'native', 'orca-node', 'orca_node.node')
+)
+const E = '\x1b'
+
+// Each deviation: a minimal repro + a probe reading some scalar (cursor row, …)
+// so xterm's wrong value and the spec-correct value are concrete.
+export const DEVIATIONS = [
+  {
+    id: 'decrc-tracks-scroll',
+    title: 'DECRC restores the cursor one row too high after an intervening scroll',
+    bytes: `${E}[5;2H${E}7\n\n\n\n${E}8`,
+    cols: 6,
+    rows: 8,
+    spec: 'DEC STD 070 / VT520 (DECSC/DECRC): the saved cursor is a screen coordinate; DECRC restores that absolute row. Intervening scrolls do not move it.',
+    probe: 'cursor row after the sequence',
+    xterm: 3,
+    correct: 4,
+    note: 'Save at row 4, four line feeds (one scroll), restore. xterm.js stores the saved cursor as an absolute scrollback position, so DECRC follows the scrolled content one row up. Real VT terminals (and xterm-C) restore to the saved screen row; the engine matches the spec.'
+  },
+  {
+    id: 'cuu-down-from-top-margin-under-origin',
+    title: 'CUU moves the cursor DOWN, away from the top margin (origin mode)',
+    bytes: `${E}[?6h${E}[4;17r${E}[8A`,
+    cols: 17,
+    rows: 19,
+    spec: 'ECMA-48 §8.3.22 (CUU): the active position moves UP by n lines, stopping at the top margin.',
+    probe: 'cursor row after the sequence',
+    xterm: 6,
+    correct: 3,
+    note: 'With origin mode + a scroll region, xterm moves the cursor downward instead of clamping it to the top margin. No real program relies on this; the engine clamps per spec.'
+  },
+  {
+    id: 'cud-overshoots-under-origin',
+    title: 'CUD moves one row too far under origin mode',
+    bytes: `${E}[?6h${E}[2;6r${E}[1;1H${E}[3B`,
+    cols: 6,
+    rows: 8,
+    spec: 'ECMA-48 §8.3.19 (CUD): the active position moves DOWN by n lines. From the top margin (row 1) with n=3 the spec position is row 4.',
+    probe: 'cursor row after the sequence',
+    xterm: 5,
+    correct: 4,
+    note: 'Same origin-mode root cause as CUU: xterm miscomputes the region-relative base for vertical motion and overshoots by one. The engine moves exactly n rows per spec.'
+  },
+  {
+    id: 'vpr-overshoots-under-origin',
+    title: 'VPR moves one row too far under origin mode',
+    bytes: `${E}[?6h${E}[2;6r${E}[1;1H${E}[3e`,
+    cols: 6,
+    rows: 8,
+    spec: 'ECMA-48 §8.3.68 (VPR): the active position moves DOWN by n lines (page-relative). From row 1 with n=3 the spec position is row 4.',
+    probe: 'cursor row after the sequence',
+    xterm: 5,
+    correct: 4,
+    note: 'Origin-mode vertical-motion class (see CUU/CUD entries). VPR is page-relative — the engine moves exactly n and clamps only at the screen edge; xterm overshoots by one under origin mode.'
+  }
+]
+
+function rustCursorRow(bytes, cols, rows) {
+  const t = new HeadlessTerminal(cols, rows, 40)
+  t.write(Buffer.from(bytes, 'latin1'))
+  return t.cursor()[0]
+}
+async function xtermCursorRow(bytes, cols, rows) {
+  const t = new Terminal({ cols, rows, scrollback: 40, allowProposedApi: true })
+  await new Promise((r) => t.write(Buffer.from(bytes, 'latin1'), r))
+  return t.buffer.active.cursorY
+}
+
+let stale = 0
+let md = `# xterm.js spec deviations\n\n`
+md += `Places where the reference implementation (**xterm.js 6.1.0-beta.220**) deviates\n`
+md += `from ECMA-48 / DEC specs, found by the differential fuzzer. The engine follows\n`
+md += `the spec in each case. Re-verify with \`node deviations.mjs\` — entries are rejected\n`
+md += `if xterm no longer deviates or the engine no longer matches the spec.\n\n`
+
+for (const d of DEVIATIONS) {
+  const xv = await xtermCursorRow(d.bytes, d.cols, d.rows)
+  const rv = rustCursorRow(d.bytes, d.cols, d.rows)
+  const xtermOk = xv === d.xterm
+  const rustOk = rv === d.correct
+  if (!xtermOk || !rustOk) {
+    stale++
+    console.error(
+      `STALE ${d.id}: xterm probe=${xv} (expected ${d.xterm}, ${xtermOk ? 'ok' : 'CHANGED'}); ` +
+        `engine probe=${rv} (expected ${d.correct}, ${rustOk ? 'ok' : 'CHANGED'})`
+    )
+  } else {
+    console.log(`✓ ${d.id}: xterm=${xv} (non-spec), engine=${rv} (spec-correct)`)
+  }
+  md += `## ${d.title}\n\n`
+  md += `- **Repro** (${d.cols}×${d.rows}): \`${Buffer.from(d.bytes, 'latin1').toString('hex')}\`\n`
+  md += `- **Spec**: ${d.spec}\n`
+  md += `- **Probe**: ${d.probe}\n`
+  md += `- **xterm.js**: ${xv}${xtermOk ? '' : ' ⚠ CHANGED'} (deviates)\n`
+  md += `- **Spec-correct / engine**: ${rv}${rustOk ? '' : ' ⚠ CHANGED'}\n`
+  md += `- ${d.note}\n\n`
+}
+
+writeFileSync(join(here, 'XTERM-DEVIATIONS.md'), md)
+console.log(`\n${DEVIATIONS.length} deviation(s), ${stale} stale. Wrote XTERM-DEVIATIONS.md`)
+process.exit(stale > 0 ? 1 : 0)
