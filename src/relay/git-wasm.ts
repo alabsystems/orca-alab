@@ -1,0 +1,364 @@
+// The relay's git-output parsing, driven by the orca-git Rust core compiled to
+// wasm (rust/orca-git-wasm) instead of a hand-maintained TS reimplementation.
+//
+// The relay runs on the remote host as pure JS with NO native addon, so it used
+// to re-implement git parsing in TS — code that could (and did) drift from the
+// Rust port the main process runs via napi. These wrappers call the SAME pure
+// orca-git/orca-text functions through wasm, so relay output is byte-identical to
+// the main process. The wasm bytes are embedded (base64) so the relay stays a
+// single self-contained bundle; initSync is idempotent and lazy so callers and
+// tests need no explicit setup.
+import {
+  initSync,
+  normalizeGitErrorMessage as wasmNormalizeGitErrorMessage,
+  isNoUpstreamError as wasmIsNoUpstreamError,
+  stripCredentialsFromMessage as wasmStripCredentialsFromMessage,
+  parseStatusPorcelain as wasmParseStatusPorcelain,
+  parseNumstat as wasmParseNumstat,
+  parseWorktreeList as wasmParseWorktreeList,
+  parseGitHistoryLog as wasmParseGitHistoryLog,
+  detectPiAgentKindFromCommand as wasmDetectPiAgentKindFromCommand,
+  upstreamOnlyCommitsArePatchEquivalent as wasmUpstreamOnlyCommitsArePatchEquivalent,
+  gitPullRebaseFromBaseViaExecutor as wasmGitPullRebaseFromBaseViaExecutor,
+  getUpstreamStatusViaExecutor as wasmGetUpstreamStatusViaExecutor,
+  gitPushViaExecutor as wasmGitPushViaExecutor,
+  gitFetchViaExecutor as wasmGitFetchViaExecutor,
+  branchIsSafeToDeleteViaExecutor as wasmBranchIsSafeToDeleteViaExecutor,
+  orcaDispatch as wasmOrcaDispatch
+} from './wasm/orca_git_wasm.js'
+import { ORCA_GIT_WASM_BASE64 } from './wasm/orca_git_wasm_bg.wasm.base64'
+import { setOrcaDispatchBinding } from '../shared/orca-dispatch-seam'
+import type { GitRemoteOperation } from '../shared/git-remote-error'
+import { formatGitRemoteOperationTimeoutMessage } from '../shared/git-remote-error'
+import type { GitStatusEntry, GitPushTarget } from '../shared/types'
+import type { GitLineStats } from '../shared/git-uncommitted-line-stats'
+import type { GitHistoryItem } from '../shared/git-history-types'
+import type { GitUpstreamStatus } from '../shared/git-status-types'
+import type { PiAgentKind } from '../shared/pi-agent-kind'
+
+let inited = false
+function ensureGitWasm(): void {
+  if (inited) {
+    return
+  }
+  // Buffer is a Uint8Array (BufferSource), which initSync accepts. Node/relay
+  // only — the relay never runs in a browser.
+  initSync({ module: Buffer.from(ORCA_GIT_WASM_BASE64, 'base64') })
+  inited = true
+}
+
+/** Bind the relay's wasm orcaDispatch into the shared dispatch seam, so
+ *  src/shared modules cut over to Rust reach the core on the relay host. Called
+ *  once at relay startup; initSync is synchronous, so the seam is ready before
+ *  any handler runs. */
+export function bindRelayOrcaDispatch(): void {
+  ensureGitWasm()
+  setOrcaDispatchBinding((module, fn, inputJson) => wasmOrcaDispatch(module, fn, inputJson))
+}
+
+/**
+ * Normalise a git remote-operation error into a user-facing message. Same
+ * signature as the shared TS `normalizeGitErrorMessage`; the `error.message`
+ * extraction happens at this JS boundary (the wasm fn takes the message string),
+ * mirroring the parity dispatch. A non-Error throw yields the fixed fallback.
+ */
+export function normalizeGitErrorMessage(error: unknown, operation?: GitRemoteOperation): string {
+  ensureGitWasm()
+  // Why: the runner's timeout text is a runner artifact, so it is matched at
+  // this boundary rather than inside the Rust core (see shared helper).
+  const timeoutMessage = formatGitRemoteOperationTimeoutMessage(error, operation)
+  if (timeoutMessage !== null) {
+    return timeoutMessage
+  }
+  const message = error instanceof Error ? error.message : undefined
+  return wasmNormalizeGitErrorMessage(message, operation)
+}
+
+/** True only for clearly-no-upstream signals (an expected state). */
+export function isNoUpstreamError(error: unknown): boolean {
+  ensureGitWasm()
+  return wasmIsNoUpstreamError(error instanceof Error ? error.message : undefined)
+}
+
+/** Scrub credentials embedded in a git URL within `message` — the same Rust
+ *  core the main process runs via napi. */
+export function stripCredentialsFromMessage(message: string): string {
+  ensureGitWasm()
+  return wasmStripCredentialsFromMessage(message)
+}
+
+/** The Rust parser's own status-scan result shape (flat upstream fields, `u`
+ *  records deferred, cap applied during the scan). */
+export type StatusPorcelainScan = {
+  entries: GitStatusEntry[]
+  unmergedLines: string[]
+  ignoredPaths: string[]
+  head?: string
+  branch?: string
+  upstreamName?: string
+  ahead?: number
+  behind?: number
+  didHitLimit?: boolean
+  /** Changed entries observed — `limit + 1` when the cap stopped the scan. */
+  statusLength: number
+}
+
+/**
+ * Scan `git status --porcelain=v2 --branch` bytes, capping the changed-entry
+ * count DURING the scan (`limit` 0 disables the cap). Records are independent and
+ * newline-delimited, so a line-aligned slice scans identically to the whole
+ * output — that is what lets the relay's streaming reader feed this per chunk.
+ */
+export function scanStatusPorcelain(stdout: string, limit: number): StatusPorcelainScan {
+  ensureGitWasm()
+  return JSON.parse(
+    wasmParseStatusPorcelain(Buffer.from(stdout, 'utf8'), limit)
+  ) as StatusPorcelainScan
+}
+
+/**
+ * Parse `git status --porcelain=v2 --branch` output into the relay's structured
+ * shape. Passes limit 0 (cap disabled) so the parser returns ALL entries, exactly
+ * like the old relay-local parser. Adapts the wasm's flat upstream fields into the
+ * nested `upstreamStatus` the relay consumers expect.
+ */
+export function parseStatusOutput(stdout: string): {
+  entries: GitStatusEntry[]
+  unmergedLines: string[]
+  ignoredPaths: string[]
+  head?: string
+  branch?: string
+  upstreamStatus: {
+    hasUpstream: boolean
+    upstreamName?: string
+    ahead: number
+    behind: number
+  }
+} {
+  const r = scanStatusPorcelain(stdout, 0)
+  return {
+    entries: r.entries,
+    unmergedLines: r.unmergedLines,
+    ignoredPaths: r.ignoredPaths,
+    head: r.head,
+    branch: r.branch,
+    upstreamStatus:
+      r.upstreamName !== undefined
+        ? {
+            hasUpstream: true,
+            upstreamName: r.upstreamName,
+            ahead: r.ahead ?? 0,
+            behind: r.behind ?? 0
+          }
+        : { hasUpstream: false, ahead: 0, behind: 0 }
+  }
+}
+
+/**
+ * `git diff --numstat` (text or `-z`) parsed to a `path -> {added?, removed?}`
+ * Map — same shape as the old shared TS `parseNumstat`. The wasm returns a JSON
+ * object; JSON preserves the file order so the Map keeps numstat order.
+ */
+export function parseNumstat(stdout: string): Map<string, GitLineStats> {
+  ensureGitWasm()
+  const obj = JSON.parse(wasmParseNumstat(Buffer.from(stdout, 'utf8'))) as Record<
+    string,
+    GitLineStats
+  >
+  return new Map(Object.entries(obj))
+}
+
+/**
+ * `git worktree list --porcelain` (or the `-z` NUL form) parsed to
+ * `GitWorktreeInfo[]`. Same signature as the old relay-local parser; the wasm
+ * output additionally carries `isSparse: true` for sparse worktrees (the main
+ * process's napi path already emits it, so consumers handle it).
+ */
+export function parseWorktreeList(
+  output: string,
+  options: { nulDelimited?: boolean } = {}
+): Record<string, unknown>[] {
+  ensureGitWasm()
+  return JSON.parse(wasmParseWorktreeList(output, options.nulDelimited ?? false)) as Record<
+    string,
+    unknown
+  >[]
+}
+
+/**
+ * NUL-delimited `git log` (in `GIT_HISTORY_COMMIT_FORMAT`) parsed to
+ * `GitHistoryItem[]`. Injected into the shared `loadGitHistoryFromExecutor` so the
+ * relay runs the Rust parser instead of the TS default.
+ */
+export function parseGitHistoryLog(stdout: string): GitHistoryItem[] {
+  ensureGitWasm()
+  return JSON.parse(wasmParseGitHistoryLog(stdout)) as GitHistoryItem[]
+}
+
+/** Which Pi-compatible agent a launch command starts ('omp' for OMP, else
+ *  'pi') — the same orca-text detector the main process runs via napi. */
+export function detectPiAgentKindFromCommand(command: string | undefined): PiAgentKind {
+  ensureGitWasm()
+  return wasmDetectPiAgentKindFromCommand(command) as PiAgentKind
+}
+
+/** True when `git cherry` mark output shows ≥1 commit and every commit is
+ *  patch-equivalent (`=`) — the behind-commits probe. Main's equivalent runs
+ *  inside the Rust upstream/push flows; the shared TS parser was deleted. */
+export function upstreamOnlyCommitsArePatchEquivalent(cherryMarkOutput: string): boolean {
+  ensureGitWasm()
+  return wasmUpstreamOnlyCommitsArePatchEquivalent(cherryMarkOutput)
+}
+
+/** A relay git runner: runs git (optionally piping `stdin`) and RESOLVES its
+ *  captured output, or REJECTS (non-zero exit or spawn failure) like the relay's
+ *  execFileAsync-backed `git()`. */
+export type RelayRunGit = (
+  args: string[],
+  stdin: string | null
+) => Promise<{ stdout: string; stderr: string }>
+
+/**
+ * Adapt a relay `runGit` into the executor the async wasm "A bridge" calls back
+ * into — the SSH-safe seam: Rust drives the multi-round git logic, but git is
+ * still spawned here (all WSL/SSH/env routing intact). Mirrors the main process's
+ * `makeRustGitExecutor`: a git that spawned and exited must RESOLVE carrying its
+ * exit code (default 1) + stderr, so the Rust runner classifies it — the bridge
+ * output must never reject for a git that ran. A true spawn failure (a STRING
+ * errno like `ENOENT`) is re-thrown so the bridge reports a spawn error.
+ */
+function makeRelayGitExecutor(runGit: RelayRunGit): (
+  args: string[],
+  stdin: string | null
+) => Promise<{
+  stdout: string
+  stderr: string
+  exitCode: number
+}> {
+  return async (args, stdin) => {
+    try {
+      const { stdout, stderr } = await runGit(args, stdin)
+      return { stdout: stdout ?? '', stderr: stderr ?? '', exitCode: 0 }
+    } catch (error) {
+      const err = error as { code?: unknown; stdout?: unknown; stderr?: unknown; message?: unknown }
+      if (typeof err.code === 'string') {
+        throw error
+      }
+      const stderr =
+        typeof err.stderr === 'string'
+          ? err.stderr
+          : typeof err.message === 'string'
+            ? err.message
+            : ''
+      return {
+        stdout: typeof err.stdout === 'string' ? err.stdout : '',
+        stderr,
+        exitCode: typeof err.code === 'number' ? err.code : 1
+      }
+    }
+  }
+}
+
+/**
+ * Pull-rebase the current branch onto a base ref, driving orca-git's
+ * `git_pull_rebase_from_base` in Rust (via wasm) over the relay's git executor —
+ * the SAME code the main process runs through the napi "A bridge". Rust resolves
+ * the base's remote/branch (read-only `git remote` → `check-ref-format`) AND runs
+ * the mutating `pull --rebase <remote> <branch>` in one call, normalizing errors
+ * as 'pull' internally (the raw "Choose a remote base branch…" message tails
+ * identically) — rejecting with the already-normalized message.
+ */
+export async function gitPullRebaseFromBase(runGit: RelayRunGit, baseRef: string): Promise<void> {
+  ensureGitWasm()
+  await wasmGitPullRebaseFromBaseViaExecutor(makeRelayGitExecutor(runGit), baseRef)
+}
+
+/**
+ * Explicit publish-target upstream/ahead-behind status, driving orca-git's
+ * multi-round resolver in Rust (via wasm) over the relay's git executor — the
+ * SAME code the main process runs through the napi "A bridge". Rust does the
+ * `check-ref-format`, `rev-parse`/`rev-list`, cherry-mark patch-equivalence, and
+ * the no-upstream swallow + error normalization; it resolves the
+ * `GitUpstreamStatus` or rejects with the already-normalized message. The
+ * JS-boundary "Invalid PR push target …" shape guard stays in the caller.
+ */
+export async function getUpstreamStatus(
+  runGit: RelayRunGit,
+  pushTarget: GitPushTarget
+): Promise<GitUpstreamStatus> {
+  ensureGitWasm()
+  const json = await wasmGetUpstreamStatusViaExecutor(
+    makeRelayGitExecutor(runGit),
+    pushTarget.remoteName,
+    pushTarget.branchName,
+    pushTarget.remoteUrl ?? null
+  )
+  return JSON.parse(json) as GitUpstreamStatus
+}
+
+/**
+ * Push the current branch, driven in Rust (via wasm) over the relay's git
+ * executor — the SAME `git_push` the main process runs through the napi "A
+ * bridge". Rust validates an explicit target, resolves the refspec
+ * (explicit; else the branch's configured push remote so a fork-tracking worktree
+ * doesn't send review commits upstream; else first-publish `origin HEAD`), runs
+ * the mutating push, and normalizes errors internally — rejecting with the
+ * already-normalized message. The JS-boundary "Invalid PR push target …" shape
+ * guard stays in the caller.
+ */
+export async function gitPush(
+  runGit: RelayRunGit,
+  pushTarget: GitPushTarget | undefined,
+  forceWithLease: boolean
+): Promise<void> {
+  ensureGitWasm()
+  await wasmGitPushViaExecutor(
+    makeRelayGitExecutor(runGit),
+    pushTarget?.remoteName ?? null,
+    pushTarget?.branchName ?? null,
+    pushTarget?.remoteUrl ?? null,
+    forceWithLease
+  )
+}
+
+/**
+ * Fetch (prune), driven in Rust (via wasm) over the relay's git executor — the
+ * SAME `git_fetch` the main process runs through the napi "A bridge". Rust
+ * validates an explicit target (`check-ref-format`), runs `fetch --prune
+ * [<remote>]`, and normalizes errors internally — rejecting with the
+ * already-normalized message. No effective-upstream resolution, unlike
+ * fast-forward/pull. The JS-boundary "Invalid PR push target …" shape guard stays
+ * in the caller.
+ */
+export async function gitFetch(
+  runGit: RelayRunGit,
+  pushTarget: GitPushTarget | undefined
+): Promise<void> {
+  ensureGitWasm()
+  await wasmGitFetchViaExecutor(
+    makeRelayGitExecutor(runGit),
+    pushTarget?.remoteName ?? null,
+    pushTarget?.branchName ?? null,
+    pushTarget?.remoteUrl ?? null
+  )
+}
+
+/**
+ * Whether a local branch is safe to delete on worktree removal, driven in Rust
+ * (via wasm) over the relay's git executor — the SAME `branch_is_safe_to_delete`
+ * the main process runs through the napi "A bridge". Rust gathers candidate base
+ * refs, refreshes the relevant remotes (`fetch --prune`), and decides whether the
+ * branch has any unmerged changes (tree-equal merge, patch-equivalent commits, or
+ * a squash match via `git patch-id --stable` piped through the executor's stdin).
+ * The decision only ever moves toward *preserve*, so it can't over-delete; the
+ * destructive `git branch -d/-D` stays in the caller, gated on this result. A
+ * missing `merge-tree --write-tree` on git <2.38 degrades to the cherry checks —
+ * identical to the old TS capability fallback.
+ */
+export async function branchIsSafeToDelete(
+  runGit: RelayRunGit,
+  branchName: string
+): Promise<boolean> {
+  ensureGitWasm()
+  return wasmBranchIsSafeToDeleteViaExecutor(makeRelayGitExecutor(runGit), branchName)
+}

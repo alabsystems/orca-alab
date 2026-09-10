@@ -1,0 +1,93 @@
+import './assets/main.css'
+
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import { useTranslation } from 'react-i18next'
+import App from './App'
+import { RecoverableRenderErrorBoundary } from './components/error-boundaries/RecoverableRenderErrorBoundary'
+import {
+  installRendererCrashDiagnostics,
+  recordRendererCrashBreadcrumb
+} from './lib/crash-diagnostics'
+import { applyDocumentTheme } from './lib/document-theme'
+import { startGitWasm } from './lib/git-wasm/git-line-stats'
+import { startCryptoWasm } from './lib/crypto-wasm/browser-crypto-wasm'
+import { installTypingLatencyDiagnostic } from './lib/typing-latency-diagnostic'
+import { primeStartupSnapshot } from './app-shell/app-startup-snapshot'
+import { shouldEnableReactGrab } from './lib/react-grab-dev-gate'
+import { I18nProvider } from './i18n/I18nProvider'
+import { translate } from './i18n/i18n'
+import { applyAppDocumentTitle } from './startup/app-document-title'
+
+recordRendererCrashBreadcrumb('renderer_bootstrap_started', { dev: import.meta.env.DEV })
+installRendererCrashDiagnostics()
+void applyAppDocumentTitle(() => window.api.app.getIdentity(), document)
+// Compile the orca-git wasm eagerly. It backs the Rust agent-startup plan
+// builders (session auto-resume / cold-restore run these imperatively on boot,
+// with no ready-subscription). The first render no longer waits on it — the
+// startup hydration chain awaits readiness (git-wasm-startup-gate) before any
+// store hydration or terminal reconnect, so a restored agent still never sees
+// a pre-ready null builder.
+void startGitWasm()
+// Fire the batched boot-state read now so the IPC round-trip overlaps wasm
+// compile and React mount; the hydration chain adopts this same promise.
+void primeStartupSnapshot()
+// Compile the E2EE crypto wasm eagerly so it is ready before any remote
+// WebSocket handshake (which needs it synchronously to seal the box).
+void startCryptoWasm()
+installTypingLatencyDiagnostic()
+
+if (
+  import.meta.env.DEV &&
+  shouldEnableReactGrab({
+    dev: import.meta.env.DEV,
+    enableFlag: import.meta.env.VITE_ENABLE_REACT_GRAB
+  })
+) {
+  void import('react-grab').then(({ init }) => init())
+  void import('react-grab/styles.css')
+}
+
+applyDocumentTheme('system', { disableTransitions: false })
+
+const rootElement = document.getElementById('root')
+if (!rootElement) {
+  recordRendererCrashBreadcrumb('renderer_root_missing')
+  throw new Error('Renderer root element not found.')
+}
+// Capture the narrowed element so the `renderApp` closure keeps it non-null.
+const rootContainer: HTMLElement = rootElement
+
+function RendererRoot(): React.JSX.Element {
+  useTranslation()
+  return (
+    <RecoverableRenderErrorBoundary
+      boundaryId="app.root"
+      surface="app-root"
+      title={translate('app.recoverableError.rootTitle', 'Orca hit a renderer error.')}
+      description={translate(
+        'app.recoverableError.rootDescription',
+        'The app shell could not finish rendering. Retry to remount it, or relaunch Orca if the error persists.'
+      )}
+    >
+      <App />
+    </RecoverableRenderErrorBoundary>
+  )
+}
+
+function renderApp(): void {
+  createRoot(rootContainer).render(
+    <StrictMode>
+      <I18nProvider>
+        <RendererRoot />
+      </I18nProvider>
+    </StrictMode>
+  )
+  recordRendererCrashBreadcrumb('renderer_bootstrap_rendered')
+}
+
+// Render immediately: the first paint is the empty shell (store not yet
+// hydrated), which needs no wasm helper. Store hydration and every synchronous
+// wasm consumer that could stick on a pre-ready null fallback run inside the
+// startup hydration chain, which awaits the git-wasm startup gate first.
+renderApp()
